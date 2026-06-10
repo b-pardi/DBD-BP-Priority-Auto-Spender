@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+env/
+
+# scraped icon library is large and fully regenerable from src/scraper.py
+data/icons/*
+!data/icons/.gitkeep
+data/icons_index.json
+
+# saved bloodweb screenshots for offline tests can be large
+tests/fixtures/*.png
+!tests/fixtures/.gitkeep
+
+# claude utils
+.claude

@@ -1,0 +1,10 @@
+mss
+numpy
+opencv-python
+Pillow
+imagehash
+requests
+pydirectinput
+pytesseract
+keyboard
+tqdm

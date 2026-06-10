@@ -1,0 +1,12 @@
+{
+  "_note": "ordered priority list, highest first. each rule is a specific item (name, optional rarity) or a category. categories: item, addon, offering, perk, power. rarities: common, uncommon, rare, very rare, ultra rare.",
+  "dry_run": true,
+  "stop_bp_threshold": 0,
+  "priorities": [
+    { "type": "item", "name": "Flashlight", "rarity": "very rare" },
+    { "type": "item", "name": "Commodious Toolbox" },
+    { "type": "category", "category": "item", "rarity": "ultra rare" },
+    { "type": "category", "category": "addon", "rarity": "very rare" },
+    { "type": "category", "category": "offering" }
+  ]
+}

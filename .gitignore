@@ -13,5 +13,6 @@ data/icons_index.json
 tests/fixtures/*.png
 !tests/fixtures/.gitkeep
 
-# claude utils
+# temp outputs/utils
+.tmp/
 .claude

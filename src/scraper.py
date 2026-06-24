@@ -55,6 +55,13 @@ ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "data" / "icons"
 DEFAULT_INDEX = ROOT / "data" / "icons_index.json"
 
+# rarity comes from wiki categories: pages are tagged "<rarity> Items/Add-ons/Offerings".
+# only reliable source, since allimages carries no rarity and there are no cargo tables.
+# ~100 reworked/top-tier icons sit in a "Visceral" bucket with no rarity tag, so they stay
+# null. fine, since rarity is just a soft cross-check; the disk color is the live read.
+RARITY_WORDS = ["Common", "Uncommon", "Rare", "Very Rare", "Ultra Rare"]
+RARITY_TYPES = {"item": "Items", "addon": "Add-ons", "offering": "Offerings"}
+
 # wiki.gg etiquette: identify the scraper with a contact
 USER_AGENT = "dbd-bloodweb-autospender/0.1 (contact: brandonpardi24@gmail.com)"
 
@@ -147,7 +154,7 @@ def download_icon(session, url, dest: Path, attempts=3):
     return None
 
 
-def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False, delay=0.1):
+def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False, delay=0.1, dedup=True):
     session = _session()
     prefixes = {p: c for p, c in PREFIXES.items() if c in categories}
     index = []
@@ -178,10 +185,75 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
                 "phash": icon_phash(img),
                 "url": entry["url"],
             })
+    if dedup:
+        index = dedup_index(index)
     index.sort(key=lambda row: (row["category"], row["key"]))
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
     return index, skipped
+
+
+def dedup_index(rows):
+    """drop rows whose phash exactly duplicates another in the same category, keeping the
+    most informative copy (rarity known beats null). the wiki uploads the same sprite under
+    several filenames (sportFlashlight vs flashlightSport, Telephone vs telephone), which
+    bloats the match pool and can make id_icon's 2nd-best margin meaninglessly tiny. scoped
+    per category so a rare cross-category hash collision isn't merged."""
+    kept = {}
+    for r in rows:
+        key = (r["category"], r["phash"])
+        cur = kept.get(key)
+        if cur is None or (cur.get("rarity") is None and r.get("rarity") is not None):
+            kept[key] = r
+    return list(kept.values())
+
+
+def _norm(name):
+    """squash a name to lowercase alphanumerics so the wiki page 'Amanda's Letter' and our
+    prettified key 'Amandas Letter' compare equal."""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def category_members(session, cat_title):
+    """all page titles in a wiki category, paged via list=categorymembers (500/call)."""
+    out, cont = [], {}
+    while True:
+        params = {
+            "action": "query", "format": "json", "list": "categorymembers",
+            "cmtitle": f"Category:{cat_title}", "cmtype": "page", "cmlimit": "500"
+        }
+        params.update(cont)
+        data = session.get(API, params=params, timeout=30).json()
+        out += [m["title"] for m in data.get("query", {}).get("categorymembers", [])]
+        if "continue" not in data:
+            return out
+        cont = data["continue"]
+
+
+def fetch_rarity_map(session):
+    """build {category: {normalized_name: rarity}} from the wiki's rarity categories."""
+    rmap = {cat: {} for cat in RARITY_TYPES}
+    for our_cat, type_word in RARITY_TYPES.items():
+        for rar in RARITY_WORDS:
+            for title in category_members(session, f"{rar} {type_word}"):
+                rmap[our_cat][_norm(title)] = rar.lower()
+    return rmap
+
+
+def annotate_rarity(index_path: Path, session=None):
+    """fill the rarity field on each index row by matching its name against the wiki rarity
+    categories. edits the index in place, no icon re-download. returns (rows, filled-counts)."""
+    session = session or _session()
+    rows = json.loads(index_path.read_text(encoding="utf-8"))
+    rmap = fetch_rarity_map(session)
+    filled = Counter()
+    for r in rows:
+        rar = rmap.get(r["category"], {}).get(_norm(r["name"]))
+        r["rarity"] = rar
+        if rar:
+            filled[r["category"]] += 1
+    index_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+    return rows, filled
 
 
 def main():
@@ -198,11 +270,32 @@ def main():
     ap.add_argument("--delay", type=float, default=0.1, help="seconds to wait between downloads")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--index", type=Path, default=DEFAULT_INDEX)
+    ap.add_argument(
+        "--rarity", action="store_true",
+        help="annotate the existing index with rarity from the wiki, no re-download"
+    )
+    ap.add_argument("--dedup", action="store_true", help="dedup the existing index by phash and exit")
+    ap.add_argument("--no-dedup", action="store_true", help="skip phash dedup during a scrape")
     args = ap.parse_args()
+
+    if args.dedup:
+        rows = json.loads(args.index.read_text(encoding="utf-8"))
+        deduped = dedup_index(rows)
+        deduped.sort(key=lambda r: (r["category"], r["key"]))
+        args.index.write_text(json.dumps(deduped, indent=2, ensure_ascii=False), encoding="utf-8")
+        print(f"deduped {args.index}: {len(rows)} -> {len(deduped)} ({len(rows) - len(deduped)} removed)")
+        return
+    if args.rarity:
+        rows, filled = annotate_rarity(args.index)
+        print(f"annotated rarity in {args.index}")
+        for cat, type_word in RARITY_TYPES.items():
+            total = sum(1 for r in rows if r["category"] == cat)
+            print(f"  {cat:9} {filled[cat]}/{total} matched")
+        return
 
     index, skipped = scrape(
         args.categories, args.out, args.index,
-        limit=args.limit, force=args.force, delay=args.delay
+        limit=args.limit, force=args.force, delay=args.delay, dedup=not args.no_dedup
     )
 
     counts = Counter(row["category"] for row in index)

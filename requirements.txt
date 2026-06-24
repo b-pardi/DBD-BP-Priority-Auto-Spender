@@ -8,3 +8,4 @@ pydirectinput
 pytesseract
 keyboard
 tqdm
+matplotlib

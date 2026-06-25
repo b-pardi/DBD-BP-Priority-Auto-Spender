@@ -36,9 +36,19 @@ EMPIRICAL_SEED = {
 # sensitive so weight it least. that weighting is most of our gamma tolerance.
 HSV_WEIGHTS = (4.0, 1.0, 0.3)
 
+# normalized glyph canvas size. MUST match scraper.GLYPH_SIZE: query and template glyphs have
+# to be framed identically or their phashes aren't comparable. phash downsamples to 32x32
+# internally so the exact value barely matters, only that both sides agree.
+GLYPH_SIZE = 128
+
 # rarity anchor colors: load (usr, auto-seeded from EMPIRICAL_SEED), classify, refine (part 4)
 _HSVs = None  # cached {rarity: [h, s, v]} for the run
 
+NODE_SHAPE_DICT = { # geometric relationship of node content and node type
+    'square': ['item', 'addon'], # hard to identify the '+' distinguishing item from addon, lump them together
+    'rhombus': ['perk'],
+    'hexagon': ['offering']
+}
 
 def _is_nonempty(path):
     return path.is_file() and path.stat().st_size > 0
@@ -86,6 +96,32 @@ def _hsv_dist(a, b):
     return wh * dh + ws * ds + wv * dv
 
 
+def hue_circular_delta(hues, ref):
+    """signed shortest distance from ref to each hue on opencv's 0..179 wheel, in [-90, 90).
+    hue wraps at the red/brown seam (0 and 180 are the same color), so a plain subtract is
+    wrong near it. vectorized: pass a scalar or an ndarray of hues, get the same shape back.
+    this is the circularity primitive behind both the disk-hue median and the rarity hue mask."""
+    return (np.asarray(hues, dtype=np.float32) - ref + 90.0) % 180.0 - 90.0
+
+
+def hue_circular_mean(hues):
+    """circular mean of a set of opencv hues (0..179). a plain mean is wrong across the 0/180
+    seam, so average on the unit circle (hue is h*2 degrees) and map the angle back. used as
+    the stable anchor the disk-hue median offsets from."""
+    ang = np.asarray(hues, np.float32) * (np.pi / 90.0)   # 0..179 -> radians
+    return (np.arctan2(np.sin(ang).mean(), np.cos(ang).mean()) % (2 * np.pi)) * (90.0 / np.pi)
+
+
+def hue_band_mask(hsv, h_ref, h_tol, s_floor=0, v_floor=0):
+    """uint8 (h,w) mask of pixels within h_tol of h_ref on the hue wheel and above the s/v
+    floors. wraps the 0/180 seam that cv2.inRange can't (via hue_circular_delta), so this is
+    the one place band+inrange lives: refine_node isolates one rarity, disk_color_mask ORs it
+    over all five. hsv is a (h,w,3) opencv-hsv image."""
+    h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
+    band = (np.abs(hue_circular_delta(h, h_ref)) <= h_tol) & (s >= s_floor) & (v >= v_floor)
+    return band.astype(np.uint8) * 255
+
+
 def classify_rarity(hsv, anchors=None):
     """nearest-anchor rarity for one sampled disk color. returns (rarity, distance)."""
     anchors = anchors or get_ref_hsvs()
@@ -105,10 +141,8 @@ def disk_color_mask(frame, htol=8, s_floor=62, v_floor=38):
     frame_mask = np.zeros((hsv.shape[0], hsv.shape[1]), dtype=np.uint8)
     
     for rarity, (h, s, v) in anchors.items():
-        lo, hi = max(0, h - htol), min(h + htol, 179) # chop off tol at H bounds, may consider wrapping band around back to 0 but fine for now
-        cur_rarity_mask = cv2.inRange(hsv, (lo, s_floor, v_floor), (hi, 255, 255))
-        frame_mask |= cur_rarity_mask
-    
+        frame_mask |= hue_band_mask(hsv, h, htol, s_floor, v_floor)  # wrap-safe, same util as refine_node
+
     return frame_mask
 
 
@@ -157,13 +191,24 @@ def id_icon(icon_bgr, rows, ref_hashes, pool=None):
     once we read the node's socket shape, giving a smaller cleaner candidate set.
     returns (row, dist, margin): best row, its hamming distance (0..64, lower is better),
     and the gap to the 2nd best (a small gap means an ambiguous match)."""
-    gray = cv2.cvtColor(icon_bgr, cv2.COLOR_BGR2GRAY)          # same luma weights as PIL 'L'
-    q = imagehash.phash(Image.fromarray(gray)).hash.flatten()  # (64,) bool
-    dists = np.count_nonzero(ref_hashes != q, axis=1)          # (n,) hamming: differing bits
+    gray = cv2.cvtColor(icon_bgr, cv2.COLOR_BGR2GRAY) # same luma weights as PIL 'L'
+    q = imagehash.phash(Image.fromarray(gray)).hash.flatten() # (64,) bool
+    dists = np.count_nonzero(ref_hashes != q, axis=1) # (n,) hamming: differing bits
     if pool is not None:
-        dists = np.where(pool, dists, 65)                      # 65 > max dist of 64
+        dists = np.where(pool, dists, 65) # 65 > max dist of 64
     order = np.argsort(dists)
     return rows[order[0]], int(dists[order[0]]), int(dists[order[1]] - dists[order[0]])
+
+
+def _crop_glyph_from_frame(frame, x, y, r, r_tol=1):
+    """crop frame around glyph bbox"""
+    x, y, r, r_eff = int(x), int(y), int(r), int(r * r_tol)
+    h, w, = frame.shape[:2]
+    
+    x0, xf = max(x-r_eff, 0), min(w, x+r_eff)
+    y0, yf = max(y-r_eff, 0), min(h, y+r_eff)
+    return frame[y0:yf, x0:xf]
+
 
 
 def _fill_holes(bin_img):
@@ -176,6 +221,28 @@ def _fill_holes(bin_img):
     cv2.floodFill(ff, mask, (0, 0), 255) # flood outside bg white
     holes = cv2.bitwise_not(ff) # enclosed interiors only
     return bin_img | holes
+
+
+def _binarize(img, thresh_method='adaptive_gaussian', blur_ksize=5, canny_lo=0, canny_hi=255):
+    if thresh_method.lower() == 'adaptive_gaussian':
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray_blur = cv2.GaussianBlur(gray, (blur_ksize, blur_ksize), 0) # blur a little to tame glyph/web texture
+        #bin_frame = cv2.adaptiveThreshold(gray_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 17, 2)
+        bin_frame = cv2.adaptiveThreshold(gray_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 17, 2)
+
+    elif thresh_method.lower() == 'otsu':
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        gray_blur = cv2.GaussianBlur(gray, (blur_ksize, blur_ksize), 0) # blur a little to tame glyph/web texture
+        _, bin_frame = cv2.threshold(gray_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    
+    elif thresh_method.lower() == 'canny':
+        blur_frame = cv2.GaussianBlur(img, (blur_ksize, blur_ksize), 0) # binarized canny on bloodweb nodes sucks in b/w, blur on color
+        bin_frame = cv2.Canny(blur_frame, canny_lo, canny_hi, L2gradient=True)
+
+    else:
+        raise ValueError("Invalid Thresholding Method. Valid types: ['adaptive_gaussian', 'otsu', 'canny']")
+    
+    return bin_frame
 
 
 def find_circles(
@@ -194,23 +261,7 @@ def find_circles(
         - rough pass to grab the radii of all countour within (rmin,rmax)
         - peak finding to identify node centers
     """    
-    if thresh_method.lower() == 'adaptive_gaussian':
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_blur = cv2.GaussianBlur(gray, (blur_ksize, blur_ksize), 0) # blur a little to tame glyph/web texture
-        #bin_frame = cv2.adaptiveThreshold(gray_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY, 17, 2)
-        bin_frame = cv2.adaptiveThreshold(gray_blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C, cv2.THRESH_BINARY_INV, 17, 2)
-
-    elif thresh_method.lower() == 'otsu':
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        gray_blur = cv2.GaussianBlur(gray, (blur_ksize, blur_ksize), 0) # blur a little to tame glyph/web texture
-        _, bin_frame = cv2.threshold(gray_blur, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-    
-    elif thresh_method.lower() == 'canny':
-        blur_frame = cv2.GaussianBlur(frame, (blur_ksize, blur_ksize), 0) # binarized canny on bloodweb nodes sucks in b/w, blur on color
-        bin_frame = cv2.Canny(blur_frame, canny_lo, canny_hi, L2gradient=True)
-
-    else:
-        raise ValueError("Invalid Thresholding Method. Valid types: ['adaptive_gaussian', 'otsu', 'canny']")
+    bin_frame = _binarize(frame, thresh_method=thresh_method, blur_ksize=blur_ksize, canny_lo=canny_lo, canny_hi=canny_hi)
 
     open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_ksize, open_ksize))   
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_ksize, close_ksize))  
@@ -287,12 +338,11 @@ def sample_disk_hsv(hsv, x, y, r, s_floor=30, v_floor=20, min_px=6):
     px = hsv[keep]
     if len(px) <= min_px:
         return None
-    # hue is circular (0..179 wraps at the red seam)
-    # unwrap to the branch nearest the circular mean, then median there.
+    # hue is circular (0..179 wraps at the red seam): anchor on the circular mean,
+    # then take the median of the wrap-safe offsets from it.
     hue = px[:, 0].astype(np.float32)
-    ang = hue * (np.pi / 90.0) # 0..179 -> radians (h*2 degrees)
-    mu = (np.arctan2(np.sin(ang).mean(), np.cos(ang).mean()) % (2 * np.pi)) * (90.0 / np.pi)
-    h_med = (mu + np.median((hue - mu + 90) % 180 - 90)) % 180
+    mu = hue_circular_mean(hue)
+    h_med = (mu + np.median(hue_circular_delta(hue, mu))) % 180
     return np.array([h_med, np.median(px[:, 1]), np.median(px[:, 2])])
 
 
@@ -320,7 +370,33 @@ def find_nodes_in_frame(frame, debug=False, max_anchor_dist=None):
     return nodes
 
 
-def normalize_glyph(img_bgr, rarity=None, htol=12, s_floor=40, out_size=128):
+def refine_node(
+        frame, x_hat, y_hat, r_hat, rarity,
+        r_tol=1.25, close_ksize=5,
+        h_tol=8, s_floor=25, v_floor=22, min_px=50
+    ):
+    """for each node, rerun contour detection to refine node circle more precisely at a local level
+    takes in full frame and initial estimate of circle bounds, returns refined circle bounds
+    """
+    node_crop = _crop_glyph_from_frame(frame, x_hat, y_hat, r_hat, r_tol=r_tol)
+    node_hsv = cv2.cvtColor(node_crop, cv2.COLOR_BGR2HSV)
+    h_ref = get_ref_hsvs()[rarity][0] # hue anchor of this node's rarity
+    mask = hue_band_mask(node_hsv, h_ref, h_tol, s_floor, v_floor)  # wrap-safe color isolation
+    if cv2.countNonZero(mask) < min_px:  # countNonZero, not len(): masked px, not crop rows
+        print("WARNING: Node Color not in rarity band; Ideally this is due to node refinement removing a non-existent but detected node.")
+        return None
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_ksize, close_ksize))
+    _show(mask, title='refine_node() - initial mask')
+    
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel) # close gaps in color mask
+    _show(mask, title='refine_node() - morph close')
+    mask = _fill_holes(mask)
+    
+    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+    _show(mask, title='refine_node() - fill holes + contours', contours=contours)
+
+
+def normalize_glyph(frame, rarity=None, htol=12, s_floor=40, out_size=GLYPH_SIZE):
     """strip the colored rarity disk from a node crop so only the glyph remains on black, matching the scraped sprites
     then tight-crop + square-pad so the framing matches.
     phash squishes whatever it gets to 32x32,
@@ -331,8 +407,9 @@ def normalize_glyph(img_bgr, rarity=None, htol=12, s_floor=40, out_size=128):
     cleanup the sprite never needs. the two only have to agree on the final framing
 
     returns a bgr glyph-on-black square, or None if nothing survives the mask"""
-    h, w = img_bgr.shape[:2]
-    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    
+    h, w = frame.shape[:2]
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     cy, cx, r = h / 2, w / 2, min(h, w) / 2         # crop is centered on the node
 
     # drop the ring and the out-of-disk corners; shrink a little since the crop/center isn't exact
@@ -345,19 +422,19 @@ def normalize_glyph(img_bgr, rarity=None, htol=12, s_floor=40, out_size=128):
     if rarity in anchors:
         href = anchors[rarity][0]
         dh = np.abs(hsv[..., 0].astype(int) - href)
-        dh = np.minimum(dh, 180 - dh)               # hue is circular
+        dh = np.minimum(dh, 180 - dh) # hue is circular
         is_disk = (dh <= htol) & (hsv[..., 1] >= s_floor)
     else:
-        is_disk = np.zeros((h, w), bool)            # no rarity -> fall back to inner crop only
+        is_disk = np.zeros((h, w), bool) # no rarity -> fall back to inner crop only
 
     glyph_mask = inside & ~is_disk
     ys, xs = np.where(glyph_mask)
     if len(xs) == 0:
         return None
 
-    glyph = np.zeros_like(img_bgr)
-    glyph[glyph_mask] = img_bgr[glyph_mask]                       # glyph px on black
-    glyph = glyph[ys.min():ys.max() + 1, xs.min():xs.max() + 1]   # tight-crop to glyph bbox
+    glyph = np.zeros_like(frame)
+    glyph[glyph_mask] = glyph[glyph_mask] # glyph px on black
+    glyph = glyph[ys.min():ys.max() + 1, xs.min():xs.max() + 1] # tight-crop to glyph bbox
 
     # square-pad (preserve aspect) so a wide vs tall glyph stays distinguishable after phash's
     # square resize, then resize to a fixed size (also lets the ncc tie-breaker compare same-size).
@@ -369,26 +446,72 @@ def normalize_glyph(img_bgr, rarity=None, htol=12, s_floor=40, out_size=128):
     return cv2.resize(canvas, (out_size, out_size), interpolation=cv2.INTER_AREA)
 
 
-def detect(frame, rows=None, hashes=None, debug=False):
-    """full pipeline; returns [{name, category, rarity, x, y, radius, dist, margin}].
+def read_socket_shape(frame, x, y, r):
+    node = _crop_glyph_from_frame(frame, x, y, r)
+    bin_node = _binarize(node)
+    contours = cv2.findContours(bin_node, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
 
-    pseudocode:
-      rows, hashes = (rows, hashes) or load_index()
-      for (x, y, r, rarity) in find_nodes_in_frame(frame):
-        crop = frame[y-r:y+r, x-r:x+r]
-        category = read_socket_shape(frame, x, y, r)     # may be None
-        glyph = normalize_glyph(crop, rarity)
-        pool = bool mask of rows in `category` (or None)
-        row, dist, margin = id_icon(glyph, rows, hashes, pool=pool)
-        # reconcile: trust shape over color; use the matched row's wiki rarity (when not
-        # null) to sanity-check or override the disk-color rarity, especially blue vs purple
-        results.append({...})
-      return results
-    """
-    nodes = find_nodes_in_frame(frame, debug=True)
+    shape = None
+    r_closest = np.inf
+    for i, c in enumerate(contours):
+        area = cv2.contourArea(c)
+        r_cur = np.sqrt(4 * area / np.pi) / 2
+        if np.abs(r_cur - r) < np.abs(r_closest - r):
+            r_closest = r_cur
+            chosen_contour_idx = i
 
-    return nodes
+    chosen_contour = contours[chosen_contour_idx]
+    approx_contour = cv2.approxPolyDP(chosen_contour, 0.01 * cv2.arcLength(chosen_contour, True), True)
+    print(len(approx_contour))
+    if len == 6:
+        shape = 'hexagon'
+    if len == 4:
+        shape = 'square-rhombus'
 
+    return shape
+
+
+def detect(frame, rows=None, hashes=None, r_tol=1.2, debug=False):
+    """full pipeline; returns [{name, category, rarity, x, y, radius, dist, margin}]"""
+    
+    if rows is None or hashes is None:
+        rows, hashes = load_index()
+    
+    cats = np.array([r['category'] for r in rows]) # (n,) strings of 'item', 'perk', ...
+    nodes = find_nodes_in_frame(frame, debug=debug)
+    
+    res = []
+    for node in nodes:
+        x, y, r, rarity = int(node[0]), int(node[1]), int(node[2]), node[3]
+        refined_node = refine_node(frame, x, y, r, rarity, r_tol=1.2)
+        if refined_node is None: continue
+        x, y, r = refined_node
+        node_refined_crop = _crop_glyph_from_frame(frame, x, y, r, r_tol=1) # recrop with exact radius of refined node detection
+        _show(node_refined_crop)
+        
+        # use node contents geometry to classify node type (item/addon, perk, offering)
+        node_cat_list = read_socket_shape(node_refined_crop, x, y, r)
+        glyph = normalize_glyph(node_refined_crop, rarity) # standardize glyph sizes to match with indexed icons
+        #_show(node_refined)
+        _show(glyph)
+
+        # classifying glyph with wiki ref icons
+        pool = None if node_cat_list is None else np.isin(cats, NODE_SHAPE_DICT[node_cat_list]) # reduce comparison pool given geometric glyph cat
+        best_match_row, match_ham_dist, margin = id_icon(glyph, rows, hashes, pool=pool) # phashing glyphs with indexed icons
+        print(best_match_row, match_ham_dist, margin)
+
+        # TODO: resolve descrepancies in observed attrs vs matched icon attrs (from wiki)
+
+        res.append({
+            'x': x, 'y': y, 'r': r,
+            'rar': rarity,
+            'cat': node_cat_list,
+            'glyph_bgr': glyph,
+            'match': best_match_row,
+            'ham_dist': match_ham_dist,
+            'dist_margin': margin,
+        })
+    return res
 
 
 # part 10: debug cockpit. sample disk colors and visualize detections on fixtures.
@@ -398,7 +521,7 @@ def draw_detections(frame, nodes):
     out = frame.copy()
     for n in nodes:
         if isinstance(n, dict):
-            x, y, r = n["x"], n["y"], n["radius"]
+            x, y, r = n["x"], n["y"], n["r"]
             label = f"{n.get('rarity', '?')} {n.get('name', '?')} d{n.get('dist', '?')}"
         else:
             x, y, r, rarity = n
@@ -459,24 +582,65 @@ def _show(
     # to 0-255 first so its gradient is actually visible (binary uint8 masks pass through as-is).
     if img.ndim == 2 and img.dtype != np.uint8:
         img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+
     vis = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR) if img.ndim == 2 else img.copy()
     if edges is not None:
-        vis[edges > 0] = edge_color                    # binary-edge pixels -> overlay color
+        vis[edges > 0] = edge_color # binary-edge pixels -> overlay color
+
     if contours is not None:
         cv2.drawContours(vis, contours, -1, contour_color, 1)
+
     if circles is not None:
         for x, y, r in circles:
             c = (int(round(x)), int(round(y)))
             cv2.circle(vis, c, int(round(r)), circle_color, 2)  # the found disk
-            cv2.circle(vis, c, 2, circle_color, -1)             # center dot
+            cv2.circle(vis, c, 2, circle_color, -1) # center dot
+
     fig = plt.figure()
-    plt.imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB))   # matplotlib wants rgb
+    plt.imshow(cv2.cvtColor(vis, cv2.COLOR_BGR2RGB)) # matplotlib wants rgb
     plt.title(title)
+
     if savefig:
         plt.savefig(f".tmp/{title}.png", dpi=200)
         plt.close(fig)   # close it, else a later plt.show() from another _show pops this up too
     else:
         plt.show()
+
+
+def _show_gallery(items, title="glyphs", cols=6, savefig=False):
+    """tile a set of (image, caption) pairs in a grid, each captioned. for eyeballing the
+    per-node crops/normalized glyphs next to what they got read as (rarity, socket, match),
+    instead of squinting at the whole annotated frame. images are bgr or single-channel like
+    everywhere else here; a None image draws a blank cell (e.g. normalize_glyph returned None).
+    dev-only; matplotlib since this conda cv2 has no highgui backend."""
+    items = [it for it in items]
+    if not items:
+        print("gallery: nothing to show")
+        return
+    cols = min(cols, len(items))
+    rows = (len(items) + cols - 1) // cols
+    # squeeze=False so axes is always 2d, then flatten -> uniform handling for any grid size
+    fig, axes = plt.subplots(rows, cols, squeeze=False, figsize=(cols * 2.0, rows * 2.3))
+    axes = axes.ravel()
+    for ax, (img, cap) in zip(axes, items):
+        if img is not None and img.size:
+            rgb = (cv2.cvtColor(img, cv2.COLOR_GRAY2RGB) if img.ndim == 2
+                   else cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            ax.imshow(rgb)
+        else:
+            ax.imshow(np.zeros((8, 8, 3), np.uint8))   # blank cell for a missing glyph
+        ax.set_title(cap, fontsize=7)
+        ax.axis("off")
+    for ax in axes[len(items):]:                       # blank the unused tail cells
+        ax.axis("off")
+    fig.suptitle(title)
+    fig.tight_layout()
+    if savefig:
+        fig.savefig(f".tmp/{title}.png", dpi=200)
+        plt.close(fig)
+    else:
+        plt.show()
+
 
 if __name__ == "__main__":
     ap = argparse.ArgumentParser(description="detect debug cockpit")
@@ -486,21 +650,24 @@ if __name__ == "__main__":
     s_detect = sub.add_parser("detect", help="run detect on a fixture and show the result")
     s_detect.add_argument("fixture", type=Path)
     s_detect.add_argument("--save", type=Path, default=None)
+    s_glyphs = sub.add_parser("glyphs", help="gallery of per-node crops + normalized glyphs")
+    s_glyphs.add_argument("fixture", type=Path)
+    s_glyphs.add_argument(
+        "--match", action="store_true",
+        help="also run id_icon per node (needs the re-hashed index to mean anything)"
+    )
+    s_glyphs.add_argument("--save", action="store_true", help="save the gallery to .tmp/ instead of showing")
     args = ap.parse_args()
+
+    # TODO: replace with auto bbox (detect-then-bound on the node cluster, no hardcoded coords)
+    web_bbox = {'x0': 300, 'y0': 200, 'xf': 1500, 'yf': 1300}
 
     if args.cmd == "sample":
         _sample_window(args.fixture)
     elif args.cmd == "detect":
         frame = cv2.imread(str(args.fixture))
-        # TODO: find a way to automatically determine bounds
-        web_bbox = {
-            'x0': 300,
-            'y0': 200,
-            'xf': 1500,
-            'yf': 1300
-        }
-        frame = frame[web_bbox['y0']:web_bbox['yf'], web_bbox['x0']: web_bbox['xf']]
-        nodes = detect(frame)  # raises NotImplementedError until parts 5-9 are filled
+        frame = frame[web_bbox['y0']:web_bbox['yf'], web_bbox['x0']:web_bbox['xf']]
+        nodes = detect(frame, debug=True)
         viz = draw_detections(frame, nodes)
         if args.save:
             cv2.imwrite(str(args.save), viz)

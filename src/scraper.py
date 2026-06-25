@@ -7,17 +7,22 @@ causing false matches.
 
 source is the mediawiki api (action=query&list=allimages) filtered by the wiki's icon
 filename prefixes. cargo tables aren't exposed on this wiki, but the prefixes are a
-reliable way to enumerate each category. rarity isn't carried by the file metadata, so
-it's left null for now; detection reads rarity from the on-screen disk color anyway.
+reliable way to enumerate each category. rarity isn't in the file metadata, so it's pulled
+in the same pass from the wiki's rarity categories (item/addon/offering only; perks/powers
+have none and stay null). it's a soft cross-check; detection reads rarity live from the
+on-screen disk color.
+
+one pass does it all: download (or reuse cached) -> normalize+phash -> annotate rarity ->
+dedup -> write. just `python -m src.scraper`.
 
 writes:
   data/icons/<category>/<key>.png   the raw sprite
   data/icons_index.json             one row per icon: key, name, category, rarity, file, phash, url
 
-the phash is precomputed here so nearest-neighbor lookup at detect time is a cheap
-hamming distance over ~2k templates, instead of full template matching on every
-candidate. it's provisional: detect can recompute hashes from the saved pngs once the
-icon masking/normalization is finalized, no re-download needed.
+the phash is precomputed here (via normalize_sprite, kept in sync with detect.normalize_glyph)
+so nearest-neighbor lookup at detect time is a cheap hamming distance over ~2k templates,
+instead of full template matching on every candidate. if the framing changes on either side,
+re-run the scrape to recompute hashes from the cached pngs, no re-download needed.
 """
 
 from __future__ import annotations
@@ -120,16 +125,38 @@ def prettify(key: str) -> str:
     return s.replace("_", " ").strip()
 
 
-def icon_phash(img: Image.Image) -> str:
-    """perceptual hash of an icon sprite.
+# normalized glyph canvas size. MUST match detect.GLYPH_SIZE: an on-screen glyph and a library
+# sprite have to be framed the same way or their phashes don't compare. detect's side strips the
+# rarity disk; the sprite has none, so here it's just crop+pad+resize.
+GLYPH_SIZE = 128
 
-    transparent sprite gets composited over black, then hashed as grayscale. the result
-    is an 8x8 dct hash -> 64-bit value (str() gives 16 hex chars). provisional: keep the
-    query-side hashing in detect identical to this, or recompute both together.
+
+def normalize_sprite(img: Image.Image) -> Image.Image:
+    """frame a library sprite the way detect frames an on-screen glyph, so their phashes are
+    comparable: tight-crop to the glyph, square-pad preserving aspect, resize to a fixed size,
+    on black. phash squishes whatever it gets to 32x32, so what makes two hashes comparable is
+    identical framing (aspect + centering), not the source size.
+
+    kept in sync with detect.normalize_glyph by hand on purpose -- the two sides do different
+    cleanup (detect removes the disk, handles off-center crops) but must agree on this final
+    framing. returns an 'L' (grayscale) image ready to phash.
     """
-    flat = Image.new("RGBA", img.size, (0, 0, 0, 255))
-    flat.alpha_composite(img)
-    return str(imagehash.phash(flat.convert("L")))
+    bbox = img.getbbox()                       # glyph extent (alpha-aware); None if fully blank
+    glyph = img.crop(bbox) if bbox else img
+    gw, gh = glyph.size
+    side = max(gw, gh)
+    canvas = Image.new("RGBA", (side, side), (0, 0, 0, 255))   # black, opaque
+    canvas.alpha_composite(glyph, ((side - gw) // 2, (side - gh) // 2))   # center, transparent->black
+    canvas = canvas.resize((GLYPH_SIZE, GLYPH_SIZE), Image.LANCZOS)
+    return canvas.convert("L")
+
+
+def icon_phash(img: Image.Image) -> str:
+    """perceptual hash of an icon sprite, framed by normalize_sprite to match detect's query
+    glyphs. 8x8 dct hash -> 64-bit value (str() gives 16 hex chars). if the framing on either
+    side changes, re-run the scrape to recompute these from the cached pngs (no re-download).
+    """
+    return str(imagehash.phash(normalize_sprite(img)))
 
 
 def download_icon(session, url, dest: Path, attempts=3):
@@ -157,6 +184,10 @@ def download_icon(session, url, dest: Path, attempts=3):
 def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False, delay=0.1, dedup=True):
     session = _session()
     prefixes = {p: c for p, c in PREFIXES.items() if c in categories}
+    # rarity in the same pass: pull the wiki's rarity categories once up front, then look each
+    # icon up as we build its row, so one scrape yields a fully-populated index (no second pass).
+    # only item/addon/offering have rarity categories, so skip the fetch unless one's selected.
+    rmap = fetch_rarity_map(session) if any(c in RARITY_TYPES for c in categories) else {}
     index = []
     skipped = []
     for prefix, category in prefixes.items():
@@ -174,11 +205,13 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
                     skipped.append(fname)
                     continue
                 time.sleep(delay)            # be polite to the wiki between downloads
+            name = prettify(key)
             index.append({
                 "key": key,
-                "name": prettify(key),
+                "name": name,
                 "category": category,
-                "rarity": None,
+                # null for perks/powers (no rarity categories) and ~visceral top-tier icons
+                "rarity": rmap.get(category, {}).get(_norm(name)),
                 # relative to the index file so the library stays portable; detect
                 # resolves it against index_path.parent
                 "file": os.path.relpath(dest, index_path.parent).replace("\\", "/"),
@@ -240,22 +273,6 @@ def fetch_rarity_map(session):
     return rmap
 
 
-def annotate_rarity(index_path: Path, session=None):
-    """fill the rarity field on each index row by matching its name against the wiki rarity
-    categories. edits the index in place, no icon re-download. returns (rows, filled-counts)."""
-    session = session or _session()
-    rows = json.loads(index_path.read_text(encoding="utf-8"))
-    rmap = fetch_rarity_map(session)
-    filled = Counter()
-    for r in rows:
-        rar = rmap.get(r["category"], {}).get(_norm(r["name"]))
-        r["rarity"] = rar
-        if rar:
-            filled[r["category"]] += 1
-    index_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
-    return rows, filled
-
-
 def main():
     ap = argparse.ArgumentParser(description="scrape dbd icons + metadata into a local library")
     ap.add_argument(
@@ -270,38 +287,21 @@ def main():
     ap.add_argument("--delay", type=float, default=0.1, help="seconds to wait between downloads")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--index", type=Path, default=DEFAULT_INDEX)
-    ap.add_argument(
-        "--rarity", action="store_true",
-        help="annotate the existing index with rarity from the wiki, no re-download"
-    )
-    ap.add_argument("--dedup", action="store_true", help="dedup the existing index by phash and exit")
     ap.add_argument("--no-dedup", action="store_true", help="skip phash dedup during a scrape")
     args = ap.parse_args()
 
-    if args.dedup:
-        rows = json.loads(args.index.read_text(encoding="utf-8"))
-        deduped = dedup_index(rows)
-        deduped.sort(key=lambda r: (r["category"], r["key"]))
-        args.index.write_text(json.dumps(deduped, indent=2, ensure_ascii=False), encoding="utf-8")
-        print(f"deduped {args.index}: {len(rows)} -> {len(deduped)} ({len(rows) - len(deduped)} removed)")
-        return
-    if args.rarity:
-        rows, filled = annotate_rarity(args.index)
-        print(f"annotated rarity in {args.index}")
-        for cat, type_word in RARITY_TYPES.items():
-            total = sum(1 for r in rows if r["category"] == cat)
-            print(f"  {cat:9} {filled[cat]}/{total} matched")
-        return
-
+    # one pass: download (or reuse cached) -> normalize+phash -> annotate rarity -> dedup -> write
     index, skipped = scrape(
         args.categories, args.out, args.index,
         limit=args.limit, force=args.force, delay=args.delay, dedup=not args.no_dedup
     )
 
     counts = Counter(row["category"] for row in index)
+    filled = Counter(row["category"] for row in index if row["rarity"])
     print(f"\nindexed {len(index)} icons -> {args.index}")
     for cat, n in sorted(counts.items()):
-        print(f"  {cat:9} {n}")
+        rar = f"  ({filled[cat]} with rarity)" if filled[cat] else ""
+        print(f"  {cat:9} {n}{rar}")
     if skipped:
         print(f"skipped {len(skipped)} asset(s) that wouldn't decode after retries: {', '.join(skipped)}")
 

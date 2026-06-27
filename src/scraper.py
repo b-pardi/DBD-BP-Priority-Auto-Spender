@@ -47,13 +47,22 @@ API = "https://deadbydaylight.wiki.gg/api.php"
 
 # wiki icon filename prefix -> our category name. these prefixes are how the wiki
 # namespaces its sprite files, so they double as a clean way to enumerate each category.
+# the wiki also files some newer/special assets under an inconsistent 'Icons' (extra s)
+# prefix, so we enumerate those too or we'd silently miss them (the gold event offerings,
+# plus a batch of newer perks).
 PREFIXES = {
     "IconPerks_": "perk",
     "IconItems_": "item",
     "IconAddon_": "addon",
     "IconFavors_": "offering",
     "IconPowers_": "power",
+    "IconsFavors_": "offering",   # Icons-variant prefix: special/event offerings (10thAnniversary, ...)
+    "IconsPerks_": "perk",        # Icons-variant prefix: newer perks missing from IconPerks_
 }
+
+# prefixes whose icons are the gold "event" disk tier -- they carry no wiki rarity category,
+# so tag them 'event' directly (lets the soft cross-check + priority rules target them).
+EVENT_PREFIXES = {"IconsFavors_"}
 
 # repo root is two levels up (src/scraper.py -> repo root), so defaults land in data/
 ROOT = Path(__file__).resolve().parent.parent
@@ -210,8 +219,9 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
                 "key": key,
                 "name": name,
                 "category": category,
-                # null for perks/powers (no rarity categories) and ~visceral top-tier icons
-                "rarity": rmap.get(category, {}).get(_norm(name)),
+                # event prefixes -> 'event' (gold tier, no wiki rarity category); else the
+                # wiki rarity, or null for perks/powers and ~visceral top-tier icons
+                "rarity": "event" if prefix in EVENT_PREFIXES else rmap.get(category, {}).get(_norm(name)),
                 # relative to the index file so the library stays portable; detect
                 # resolves it against index_path.parent
                 "file": os.path.relpath(dest, index_path.parent).replace("\\", "/"),
@@ -276,8 +286,8 @@ def fetch_rarity_map(session):
 def main():
     ap = argparse.ArgumentParser(description="scrape dbd icons + metadata into a local library")
     ap.add_argument(
-        "--categories", nargs="+", default=list(PREFIXES.values()),
-        choices=list(PREFIXES.values()), help="which categories to pull"
+        "--categories", nargs="+", default=sorted(set(PREFIXES.values())),
+        choices=sorted(set(PREFIXES.values())), help="which categories to pull"
     )
     ap.add_argument(
         "--limit", type=int, default=None,

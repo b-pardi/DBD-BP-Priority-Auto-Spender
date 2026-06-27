@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 USR_HSV = ROOT / "usr" / "rarity-HSVs.json"         # active anchors, evolve per user each web
 DEFAULT_INDEX = ROOT / "data" / "icons_index.json"
 
-RARITIES = ["common", "uncommon", "rare", "very rare", "ultra rare"]
+RARITIES = ["common", "uncommon", "rare", "very rare", "ultra rare", "event"]
 
 # empirical rarity disk anchors, opencv hsv [h(0-179),s,v].
 # used bloodweb screenshots from tests/fixtures/ with src.detect sample <web_path>
@@ -30,6 +30,7 @@ EMPIRICAL_SEED = {
     "rare":       [108, 141, 77],   # blue
     "very rare":  [143, 141, 77],   # purple
     "ultra rare": [171, 209, 117],  # pink/iri
+    "event":      [21, 213, 172],   # gold, 10th-anniversary special offerings (IconsFavors_)
 }
 
 # hue carries the rarity signal so weight it most; value is the most gamma/brightness
@@ -79,6 +80,10 @@ def get_ref_hsvs():
         return _HSVs
     if _is_nonempty(USR_HSV):
         _HSVs = _load_hsv(USR_HSV)
+        # backfill any anchor the usr file predates (e.g. the 'event' band added to the seed
+        # after an earlier file was written) so a stale usr/ doesn't silently drop a tier
+        for rar, hsv in EMPIRICAL_SEED.items():
+            _HSVs.setdefault(rar, list(hsv))
     else:
         _HSVs = _seed_usr_file()  # first run: write empirical seed -> usr/ and use it
     return _HSVs
@@ -207,18 +212,21 @@ def _crop_glyph_from_frame(frame, x, y, r, r_tol=1):
     
     x0, xf = max(x-r_eff, 0), min(w, x+r_eff)
     y0, yf = max(y-r_eff, 0), min(h, y+r_eff)
-    return frame[y0:yf, x0:xf]
-
+    return frame[y0:yf, x0:xf], {'x0': x0, 'y0': y0, 'xf': xf, 'yf': yf}
 
 
 def _fill_holes(bin_img):
     """fill regions enclosed by a closed rim so each ringed disk becomes a solid blob.
-    floodfill the outside background from a corner, invert -> only enclosed holes remain,
-    OR them back in. needs (0,0) to actually be background (guard if your border has noise)."""
-    h, w = bin_img.shape
-    ff = bin_img.copy()
-    mask = np.zeros((h + 2, w + 2), np.uint8) # floodFill wants a +2 border mask
-    cv2.floodFill(ff, mask, (0, 0), 255) # flood outside bg white
+    pad a 1px background ring first so the flood seed (0,0) is ALWAYS background, even when the
+    mask runs to the crop edge -- without the pad, a blob touching (0,0) makes the floodfill a
+    no-op and the bitwise_not below paints the whole crop white (the blowup that ballooned
+    isolate's socket radius to ~2.1x). flood the outside bg, invert -> enclosed holes only, OR
+    them back in."""
+    padded = cv2.copyMakeBorder(bin_img, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
+    ff = padded.copy()
+    mask = np.zeros((padded.shape[0] + 2, padded.shape[1] + 2), np.uint8) # floodFill wants a +2 border mask
+    cv2.floodFill(ff, mask, (0, 0), 255) # flood outside bg white from the padded corner
+    ff = ff[1:-1, 1:-1] # drop the pad ring back off
     holes = cv2.bitwise_not(ff) # enclosed interiors only
     return bin_img | holes
 
@@ -360,7 +368,7 @@ def find_nodes_in_frame(frame, debug=False, max_anchor_dist=None):
         disk_hsv = sample_disk_hsv(hsv, x, y, r)
         rarity, dist = classify_rarity(disk_hsv)
         if rarity is None:
-            circles.pop(i) # remove circle from list if a rarity wasn't obtained
+            continue # remove circle from list if a rarity wasn't obtained
         if max_anchor_dist is not None and dist > max_anchor_dist:
             continue                               # not near any rarity -> probably not a node
         nodes.append((int(x), int(y), int(r), rarity))
@@ -370,54 +378,84 @@ def find_nodes_in_frame(frame, debug=False, max_anchor_dist=None):
     return nodes
 
 
-def refine_node(
+def isolate_node_contents(
         frame, x_hat, y_hat, r_hat, rarity,
-        r_tol=1.25, close_ksize=5,
-        h_tol=8, s_floor=25, v_floor=22, min_px=50
+        r_tol=1.5, roi_k=1.2, h_tol=8, s_floor=25, v_floor=22,
+        close_ksize=5, min_area_frac=0.05
     ):
-    """for each node, rerun contour detection to refine node circle more precisely at a local level
-    takes in full frame and initial estimate of circle bounds, returns refined circle bounds
-    """
-    node_crop = _crop_glyph_from_frame(frame, x_hat, y_hat, r_hat, r_tol=r_tol)
-    node_hsv = cv2.cvtColor(node_crop, cv2.COLOR_BGR2HSV)
-    h_ref = get_ref_hsvs()[rarity][0] # hue anchor of this node's rarity
-    mask = hue_band_mask(node_hsv, h_ref, h_tol, s_floor, v_floor)  # wrap-safe color isolation
-    if cv2.countNonZero(mask) < min_px:  # countNonZero, not len(): masked px, not crop rows
-        print("WARNING: Node Color not in rarity band; Ideally this is due to node refinement removing a non-existent but detected node.")
-        return None
+    """crop a coarse node, color-mask its rarity socket, and pick the central blob 
+    the coarse (x,y,r) from find_circles can be off-center/undersized, so crop wide (r_tol)
+    and recenter on the socket centroid; the roi (roi_k*r around the coarse center) keeps hue
+    bleed (bronze ring / dim web) from inflating the socket blob
+    
+    returns (cx, cy, r, contour, crop) or None:
+        cx, cy, r: full-frame click center + socket radius
+        contour: crop-local socket polygon (feed classify_socket + normalize_glyph)
+        crop: the bgr crop those two read from"""
+    crop, rel_bbox = _crop_glyph_from_frame(frame, x_hat, y_hat, r_hat, r_tol=r_tol)
+    x0, y0 = rel_bbox['x0'], rel_bbox['y0']
+
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    h_ref = get_ref_hsvs()[rarity][0] # hue anchor for this node's rarity
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_ksize, close_ksize))
-    _show(mask, title='refine_node() - initial mask')
-    
-    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel) # close gaps in color mask
-    _show(mask, title='refine_node() - morph close')
-    mask = _fill_holes(mask)
-    
-    contours, _ = cv2.findContours(mask, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-    _show(mask, title='refine_node() - fill holes + contours', contours=contours)
+    mask = hue_band_mask(hsv, h_ref, h_tol, s_floor, v_floor)
+
+    # cap the mask to a circle around the coarse center so genuine hue bleed can't grow the
+    # socket past the node (the bronze ring shares the brown/common hue, the dark web is
+    # dim-brown). coarse r is reliable now (find_circles dist-transform peaks), so this is a
+    # fair SPATIAL bound -- NOT the old "compare the blob's radius to coarse r" bug.
+    roi = np.zeros_like(mask)
+    cv2.circle(roi, (int(x_hat - x0), int(y_hat - y0)), int(roi_k * r_hat), 255, -1)
+    mask = cv2.bitwise_and(mask, roi)
+
+    mask = _fill_holes(cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel))
+
+    # biggest-enough contour whose centroid sits nearest the crop center
+    ch, cw = mask.shape
+    center = np.array([cw / 2.0, ch / 2.0])
+    best, best_d, best_ctr = None, None, None
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    for c in contours:
+        if cv2.contourArea(c) < min_area_frac * ch * cw: # skip glyph specks / ring bleed
+            continue
+        M = cv2.moments(c)
+        if M["m00"] == 0:
+            continue
+        ctr = np.array([M["m10"] / M["m00"], M["m01"] / M["m00"]])
+        d = np.linalg.norm(ctr - center)
+        if best_d is None or d < best_d:
+            best, best_d, best_ctr = c, d, ctr
+    if best is None:
+        return None
+
+    cx, cy = best_ctr[0] + x0, best_ctr[1] + y0 # centroid -> full-frame
+    (_, _), r_ref = cv2.minEnclosingCircle(best) # radius from the socket, not the guess
+    return int(round(cx)), int(round(cy)), int(round(r_ref)), best, crop
 
 
-def normalize_glyph(frame, rarity=None, htol=12, s_floor=40, out_size=GLYPH_SIZE):
-    """strip the colored rarity disk from a node crop so only the glyph remains on black, matching the scraped sprites
-    then tight-crop + square-pad so the framing matches.
-    phash squishes whatever it gets to 32x32,
-    so what makes a query hash comparable to a template hash is identical framing, not size.
+def normalize_glyph(
+        crop, contour, rarity, htol=12, s_floor=40,
+        erode_ksize=3, out_size=GLYPH_SIZE
+    ):
+    """strip the colored socket from a node crop so only the glyph remains on black, framed to
+    match scraper.normalize_sprite (tight-crop -> square-pad centered -> resize). phash squishes
+    to 32x32, so identical framing, not size, is what makes a query hash compare to a template.
 
-    kept separate from the scraper's normalize on purpose: detection isn't pixel-perfect
-    (off-center crop, ragged contour, ring bleed), so this side does the disk removal and
-    cleanup the sprite never needs. the two only have to agree on the final framing
+    uses the socket contour (from isolate_node_contents) as the interior mask instead of a circle,
+    so square/rhombus/hex corners are respected and no dark web bleeds in at the edges. returns a
+    128x128 bgr glyph-on-black square, or None if nothing survives the mask."""
+    h, w = crop.shape[:2]
+    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
 
-    returns a bgr glyph-on-black square, or None if nothing survives the mask"""
-    
-    h, w = frame.shape[:2]
-    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    cy, cx, r = h / 2, w / 2, min(h, w) / 2         # crop is centered on the node
+    # interior = filled socket polygon, eroded a touch to shed the colored rim/anti-alias
+    inside = np.zeros((h, w), np.uint8)
+    cv2.drawContours(inside, [contour], -1, 255, cv2.FILLED)
+    if erode_ksize:
+        k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_ksize, erode_ksize))
+        inside = cv2.erode(inside, k)
 
-    # drop the ring and the out-of-disk corners; shrink a little since the crop/center isn't exact
-    yy, xx = np.ogrid[:h, :w]
-    inside = (xx - cx) ** 2 + (yy - cy) ** 2 <= (0.80 * r) ** 2
-
-    # disk px = near the rarity hue and colored enough; glyph = everything else inside the disk.
-    # color-key to black mirrors the sprite's black bg (a gray disk bg would shift the dct coeffs).
+    # disk = rarity-hued + saturated; glyph = everything else inside the socket. color-key the
+    # fill to black to mirror the sprite's black bg.
     anchors = get_ref_hsvs()
     if rarity in anchors:
         href = anchors[rarity][0]
@@ -425,112 +463,104 @@ def normalize_glyph(frame, rarity=None, htol=12, s_floor=40, out_size=GLYPH_SIZE
         dh = np.minimum(dh, 180 - dh) # hue is circular
         is_disk = (dh <= htol) & (hsv[..., 1] >= s_floor)
     else:
-        is_disk = np.zeros((h, w), bool) # no rarity -> fall back to inner crop only
+        is_disk = np.zeros((h, w), bool) # no rarity -> keep whole interior
 
-    glyph_mask = inside & ~is_disk
+    glyph_mask = (inside > 0) & ~is_disk
     ys, xs = np.where(glyph_mask)
     if len(xs) == 0:
         return None
 
-    glyph = np.zeros_like(frame)
-    glyph[glyph_mask] = glyph[glyph_mask] # glyph px on black
-    glyph = glyph[ys.min():ys.max() + 1, xs.min():xs.max() + 1] # tight-crop to glyph bbox
+    glyph = np.zeros_like(crop)
+    glyph[glyph_mask] = crop[glyph_mask] # the fix: copy from crop, not the canvas
+    glyph = glyph[ys.min():ys.max() + 1, xs.min():xs.max() + 1] # tight glyph bbox
 
-    # square-pad (preserve aspect) so a wide vs tall glyph stays distinguishable after phash's
-    # square resize, then resize to a fixed size (also lets the ncc tie-breaker compare same-size).
     gh, gw = glyph.shape[:2]
     side = max(gh, gw)
     canvas = np.zeros((side, side, 3), np.uint8)
     y0, x0 = (side - gh) // 2, (side - gw) // 2
     canvas[y0:y0 + gh, x0:x0 + gw] = glyph
+
     return cv2.resize(canvas, (out_size, out_size), interpolation=cv2.INTER_AREA)
 
 
-def read_socket_shape(frame, x, y, r):
-    node = _crop_glyph_from_frame(frame, x, y, r)
-    bin_node = _binarize(node)
-    contours = cv2.findContours(bin_node, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+def classify_socket(node_contours, poly_tol=0.05):
+    """find the category of the node contents (socket) by exploiting a pattern,
+    offerings -> hexagon; perks -> rhombus; items -> square, addons -> square with a plus
+    using the contour of the socket we detect it's shape and classify the type of glyph in the node.
+    """
+    hull = cv2.convexHull(node_contours) # drop misc inner glyph noise
+    _, _, bw, bh = cv2.boundingRect(hull)
+    coverage = cv2.contourArea(hull) / (bw * bh)
 
-    shape = None
-    r_closest = np.inf
-    for i, c in enumerate(contours):
-        area = cv2.contourArea(c)
-        r_cur = np.sqrt(4 * area / np.pi) / 2
-        if np.abs(r_cur - r) < np.abs(r_closest - r):
-            r_closest = r_cur
-            chosen_contour_idx = i
-
-    chosen_contour = contours[chosen_contour_idx]
-    approx_contour = cv2.approxPolyDP(chosen_contour, 0.01 * cv2.arcLength(chosen_contour, True), True)
-    print(len(approx_contour))
-    if len == 6:
-        shape = 'hexagon'
-    if len == 4:
-        shape = 'square-rhombus'
-
-    return shape
+    if coverage <= 0.64:
+        return 'rhombus'
+    if 0.64 < coverage <= 0.8:
+        return 'hexagon'
+    if 0.8 < coverage:
+        return 'square'
 
 
-def detect(frame, rows=None, hashes=None, r_tol=1.2, debug=False):
+def detect(frame, rows=None, hashes=None, r_tol=1.5, debug=False):
     """full pipeline; returns [{name, category, rarity, x, y, radius, dist, margin}]"""
-    
     if rows is None or hashes is None:
         rows, hashes = load_index()
     
     cats = np.array([r['category'] for r in rows]) # (n,) strings of 'item', 'perk', ...
-    nodes = find_nodes_in_frame(frame, debug=debug)
+    nodes = find_nodes_in_frame(frame, debug=debug) # [(x, y, r, rarity), ...]
     
     res = []
     for node in nodes:
         x, y, r, rarity = int(node[0]), int(node[1]), int(node[2]), node[3]
-        refined_node = refine_node(frame, x, y, r, rarity, r_tol=1.2)
-        if refined_node is None: continue
-        x, y, r = refined_node
-        node_refined_crop = _crop_glyph_from_frame(frame, x, y, r, r_tol=1) # recrop with exact radius of refined node detection
-        _show(node_refined_crop)
+        iso = isolate_node_contents(frame, x, y, r, rarity, r_tol=r_tol)
+        if iso is None:
+            if debug: print("WARNING: detect() - Node skipped after failing to isolate node contents")
+            continue
         
-        # use node contents geometry to classify node type (item/addon, perk, offering)
-        node_cat_list = read_socket_shape(node_refined_crop, x, y, r)
-        glyph = normalize_glyph(node_refined_crop, rarity) # standardize glyph sizes to match with indexed icons
-        #_show(node_refined)
-        _show(glyph)
+        cx, cy, r_ref, node_contours, crop = iso
+        socket_shape = classify_socket(node_contours) # use socket shape geometry to classify node type (item/addon, perk, offering)
+        glyph = normalize_glyph(crop, node_contours, rarity) # standardize glyph sizes to match with indexed icons
+        if glyph is None:
+            if debug: print("WARNING: detect() - Node skipped after not finding a glyph in the socket")
+            continue
 
         # classifying glyph with wiki ref icons
-        pool = None if node_cat_list is None else np.isin(cats, NODE_SHAPE_DICT[node_cat_list]) # reduce comparison pool given geometric glyph cat
+        pool = None if socket_shape is None else np.isin(cats, NODE_SHAPE_DICT[socket_shape]) # reduce comparison pool given geometric glyph cat
         best_match_row, match_ham_dist, margin = id_icon(glyph, rows, hashes, pool=pool) # phashing glyphs with indexed icons
-        print(best_match_row, match_ham_dist, margin)
+        if debug: print(best_match_row, match_ham_dist, margin)
 
         # TODO: resolve descrepancies in observed attrs vs matched icon attrs (from wiki)
 
         res.append({
-            'x': x, 'y': y, 'r': r,
+            'x': cx, 'y': cy, 'r': r_ref,
             'rar': rarity,
-            'cat': node_cat_list,
+            'cat': socket_shape,
             'glyph_bgr': glyph,
-            'match': best_match_row,
-            'ham_dist': match_ham_dist,
-            'dist_margin': margin,
+            'match': best_match_row, 'ham_dist': match_ham_dist, 'dist_margin': margin
         })
     return res
 
 
 # part 10: debug cockpit. sample disk colors and visualize detections on fixtures.
 def draw_detections(frame, nodes):
-    """draw each node (circle + label) onto a copy of the frame. accepts detect() dicts or
-    (x, y, r, rarity) tuples from find_nodes_in_frame, so it works at either stage."""
+    """draw each node (circle + label) onto a copy of the frame. accepts detect() result dicts
+    or the (x, y, r, rarity) tuples from find_nodes_in_frame, so it works at either stage. the
+    dict label reads 'rarity/socket matchedname dHAMMING' -- keys come straight off detect()'s
+    output (rar, cat, match row, ham_dist), not the old name/dist that were never in the dict."""
     out = frame.copy()
     for n in nodes:
         if isinstance(n, dict):
             x, y, r = n["x"], n["y"], n["r"]
-            label = f"{n.get('rarity', '?')} {n.get('name', '?')} d{n.get('dist', '?')}"
+            match = n.get("match") or {}                # match is a library row dict (or None)
+            name = match.get("name") or match.get("key") or "?"
+            label = f"{n.get('rar', '?')}/{n.get('cat', '?')} {name} d{n.get('ham_dist', '?')}"
         else:
             x, y, r, rarity = n
             label = str(rarity)
         cv2.circle(out, (x, y), r, (0, 255, 0), 2)
-        cv2.putText(
-            out, label, (x - r, y - r - 6),
-            cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA
-        )
+        org = (x - r, y - r - 6)
+        # black underlay then green so the label stays readable over the busy web background
+        cv2.putText(out, label, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(out, label, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
     return out
 
 
@@ -672,3 +702,19 @@ if __name__ == "__main__":
         if args.save:
             cv2.imwrite(str(args.save), viz)
         _show(viz, "detect")
+
+    elif args.cmd == "glyphs":
+        # gallery panel: one cell per detected node = the normalized glyph (what the matcher saw)
+        # captioned with the verdict (rarity/socket-shape, matched name, hamming dist + margin).
+        # complements the detect command: detect shows localization on the frame, this shows the
+        # per-node glyph/shape/match quality. debug=False so no per-step windows pop.
+        frame = cv2.imread(str(args.fixture))
+        frame = frame[web_bbox['y0']:web_bbox['yf'], web_bbox['x0']:web_bbox['xf']]
+        results = detect(frame, debug=False)
+        items = []
+        for n in results:
+            match = n.get("match") or {}
+            name = match.get("name") or match.get("key") or "?"
+            cap = f"{n['rar']}/{n['cat']}\n{name}\nd{n['ham_dist']} m{n['dist_margin']}"
+            items.append((n["glyph_bgr"], cap))
+        _show_gallery(items, title=f"detections-{args.fixture.stem}", savefig=args.save)

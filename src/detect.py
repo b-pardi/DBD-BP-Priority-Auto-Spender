@@ -398,7 +398,10 @@ def isolate_node_contents(
     hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
     h_ref = get_ref_hsvs()[rarity][0] # hue anchor for this node's rarity
     close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (close_ksize, close_ksize))
-    mask = hue_band_mask(hsv, h_ref, h_tol, s_floor, v_floor)
+    # event/gold shares the bronze ring's hue but the gold disk is far more saturated (S~190+),
+    # so lift the saturation floor for it to keep the disk and drop the ring; other tiers keep s_floor
+    s_floor_eff = 150 if rarity == "event" else s_floor
+    mask = hue_band_mask(hsv, h_ref, h_tol, s_floor_eff, v_floor)
 
     # cap the mask to a circle around the coarse center so genuine hue bleed can't grow the
     # socket past the node (the bronze ring shares the brown/common hue, the dark web is
@@ -433,45 +436,41 @@ def isolate_node_contents(
     return int(round(cx)), int(round(cy)), int(round(r_ref)), best, crop
 
 
-def normalize_glyph(
-        crop, contour, rarity, htol=12, s_floor=40,
-        erode_ksize=3, out_size=GLYPH_SIZE
-    ):
+def normalize_glyph(crop, contour, erode_ksize=3, out_size=GLYPH_SIZE):
     """strip the colored socket from a node crop so only the glyph remains on black, framed to
     match scraper.normalize_sprite (tight-crop -> square-pad centered -> resize). phash squishes
     to 32x32, so identical framing, not size, is what makes a query hash compare to a template.
 
-    uses the socket contour (from isolate_node_contents) as the interior mask instead of a circle,
-    so square/rhombus/hex corners are respected and no dark web bleeds in at the edges. returns a
-    128x128 bgr glyph-on-black square, or None if nothing survives the mask."""
+    glyph = the BRIGHT pixels inside the socket polygon. the white-ish glyph always sits brighter
+    than the rarity disk fill, so an otsu cut on the socket's value channel keys the fill out
+    without any per-rarity hue math -- the old hue-subtraction left colored halos and broke on
+    gold/event (whose fill is itself bright and shares the bronze ring's hue). the contour is
+    convex-hulled first so glyph strokes that touch the socket edge don't carve notches out of the
+    interior mask. returns a GLYPH_SIZE bgr glyph-on-black square, or None if nothing survives."""
     h, w = crop.shape[:2]
-    hsv = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)
+    val = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)[..., 2]   # value channel (brightness), (h,w)
 
-    # interior = filled socket polygon, eroded a touch to shed the colored rim/anti-alias
+    # interior = filled convex socket polygon, eroded a touch to shed the colored rim/anti-alias
     inside = np.zeros((h, w), np.uint8)
-    cv2.drawContours(inside, [contour], -1, 255, cv2.FILLED)
+    cv2.drawContours(inside, [cv2.convexHull(contour)], -1, 255, cv2.FILLED)
     if erode_ksize:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_ksize, erode_ksize))
         inside = cv2.erode(inside, k)
 
-    # disk = rarity-hued + saturated; glyph = everything else inside the socket. color-key the
-    # fill to black to mirror the sprite's black bg.
-    anchors = get_ref_hsvs()
-    if rarity in anchors:
-        href = anchors[rarity][0]
-        dh = np.abs(hsv[..., 0].astype(int) - href)
-        dh = np.minimum(dh, 180 - dh) # hue is circular
-        is_disk = (dh <= htol) & (hsv[..., 1] >= s_floor)
-    else:
-        is_disk = np.zeros((h, w), bool) # no rarity -> keep whole interior
-
-    glyph_mask = (inside > 0) & ~is_disk
+    # otsu-threshold the value channel within the socket -> splits the bright glyph from the
+    # darker colored fill. compute the threshold off the inside pixels only so the dark web
+    # outside the socket doesn't drag it.
+    vin = val[inside > 0]
+    if vin.size == 0:
+        return None
+    thr, _ = cv2.threshold(vin, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    glyph_mask = (inside > 0) & (val >= thr)
     ys, xs = np.where(glyph_mask)
     if len(xs) == 0:
         return None
 
     glyph = np.zeros_like(crop)
-    glyph[glyph_mask] = crop[glyph_mask] # the fix: copy from crop, not the canvas
+    glyph[glyph_mask] = crop[glyph_mask] # keep the bgr glyph pixels, rest stays black
     glyph = glyph[ys.min():ys.max() + 1, xs.min():xs.max() + 1] # tight glyph bbox
 
     gh, gw = glyph.shape[:2]
@@ -518,7 +517,7 @@ def detect(frame, rows=None, hashes=None, r_tol=1.5, debug=False):
         
         cx, cy, r_ref, node_contours, crop = iso
         socket_shape = classify_socket(node_contours) # use socket shape geometry to classify node type (item/addon, perk, offering)
-        glyph = normalize_glyph(crop, node_contours, rarity) # standardize glyph sizes to match with indexed icons
+        glyph = normalize_glyph(crop, node_contours) # standardize glyph sizes to match with indexed icons
         if glyph is None:
             if debug: print("WARNING: detect() - Node skipped after not finding a glyph in the socket")
             continue
@@ -544,23 +543,26 @@ def detect(frame, rows=None, hashes=None, r_tol=1.5, debug=False):
 def draw_detections(frame, nodes):
     """draw each node (circle + label) onto a copy of the frame. accepts detect() result dicts
     or the (x, y, r, rarity) tuples from find_nodes_in_frame, so it works at either stage. the
-    dict label reads 'rarity/socket matchedname dHAMMING' -- keys come straight off detect()'s
-    output (rar, cat, match row, ham_dist), not the old name/dist that were never in the dict."""
+    dict label is two lines -- 'rarity/socket dHAMMING' then the matched name on its own line --
+    keys come straight off detect()'s output (rar, cat, ham_dist, match row)."""
     out = frame.copy()
     for n in nodes:
         if isinstance(n, dict):
             x, y, r = n["x"], n["y"], n["r"]
             match = n.get("match") or {}                # match is a library row dict (or None)
             name = match.get("name") or match.get("key") or "?"
-            label = f"{n.get('rar', '?')}/{n.get('cat', '?')} {name} d{n.get('ham_dist', '?')}"
+            # name on its own line so long icon names stay legible over the busy web
+            lines = [f"{n.get('rar', '?')}/{n.get('cat', '?')} d{n.get('ham_dist', '?')}", name]
         else:
             x, y, r, rarity = n
-            label = str(rarity)
+            lines = [str(rarity)]
         cv2.circle(out, (x, y), r, (0, 255, 0), 2)
-        org = (x - r, y - r - 6)
-        # black underlay then green so the label stays readable over the busy web background
-        cv2.putText(out, label, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(out, label, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+        # stack the lines just above the circle, last line nearest the rim
+        for i, line in enumerate(lines):
+            org = (x - r, y - r - 6 - (len(lines) - 1 - i) * 14)
+            # black underlay then green so the label stays readable over the busy web background
+            cv2.putText(out, line, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
+            cv2.putText(out, line, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
     return out
 
 

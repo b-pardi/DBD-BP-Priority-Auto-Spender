@@ -10,11 +10,9 @@ present it clicks the center auto-spend to finish the level and move on.
 
 ## Status
 
-early build. done and upcoming:
-
 - [x] scaffold + requirements
 - [x] scraper: pull all icons + metadata from deadbydaylight.wiki.gg
-- [ ] detect: localize nodes, read rarity, identify icon (offline, on fixtures)
+- [x] detect: localize nodes, read rarity, identify icon (offline, on fixtures)
 - [ ] priority: rank detected nodes, pick the next buy or the auto-spend fallback
 - [ ] spender: live capture/click loop, ocr stop-threshold, kill switch
 - [ ] ui: user interface for defining priorities and general program settings
@@ -23,10 +21,12 @@ early build. done and upcoming:
 
 uses a conda env named `dbdbp-env`.
 
-```
-conda activate dbdbp-env
-pip install -r requirements.txt
-```
+1. Create Virtual Environment:
+- Python venv: `python -m pip venv dbdbp-env`
+OR
+- Anaconda: `conda activate dbdbp-env`
+
+2. Install requirements: `pip install -r requirements.txt`
 
 the bp-counter ocr also needs the tesseract binary installed system-wide:
 https://github.com/UB-Mannheim/tesseract/wiki (pytesseract just wraps it).
@@ -52,4 +52,17 @@ tests/fixtures/           saved bloodweb screenshots for offline detection tests
 ```
 # build the icon library (run once, re-run after a dbd content patch)
 python -m src.scraper
+
+# test node detection on a screenshot of the dbd bloodweb (note detect.py has crop bounds that may need adjustment for now)
+python -m src.detect detect path/to/screenshot.png
 ```
+
+## How It Works
+
+### Detecting nodes on screen in the bloodweb
+
+### Matching nodes with wiki references
+
+### Priority Selection
+
+### Screen Capturing / Input Control

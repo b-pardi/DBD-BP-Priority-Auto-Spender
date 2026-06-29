@@ -1,0 +1,26 @@
+# reproducible conda env for the dbd bloodweb auto-spender (windows).
+# python is pinned to 3.11 because conda-forge tesserocr, the only tesserocr that works on
+# windows, caps there. tesserocr also pulls the tesseract 5.x binary, leptonica, and eng tessdata.
+# the scientific stack is conda-forge for a consistent abi alongside tesseract; the small input
+# and ui utilities come from pip (pydirectinput has no conda package).
+# create:  conda env create -f environment.yml
+# update:  conda env update -f environment.yml --prune
+name: dbdbp
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - tesserocr
+  - numpy
+  - opencv
+  - pillow
+  - imagehash
+  - matplotlib
+  - requests
+  - tqdm
+  - pip
+  - pip:
+      - mss
+      - pydirectinput
+      - keyboard
+      - customtkinter

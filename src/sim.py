@@ -82,3 +82,45 @@ def simulate_level(
             score=score, margin=margin, matcher='ncc',
         ))
     return nodes
+
+
+class SimSource:
+    """stateful offline source: owns one fake web, shrinks it as nodes are bought, and draws a
+    fresh level on advance, so spender's loop actually progresses under --sim instead of rescanning
+    the same web forever (a constant seed rebuilding the identical web was the original repeat bug).
+    callable like spender.live_source (returns (None, None, nodes) so the loop skips the live-only
+    ocr + bp steps); the loop also calls consume(node)/advance() to report buys and level changes.
+    the live source needs neither: the screen is its state.
+    """
+
+    def __init__(self, rows, seed=0, **kw):
+        self.rows = rows
+        self.kw = kw          # simulate_level knobs (n, low_conf_frac, discrepancy_frac, ...)
+        self.seed = seed      # stepped per level so consecutive webs differ
+        self.level = 0
+        self.nodes = []
+        self._draw()
+
+    def _draw(self):
+        # step the seed by the level so each web differs but the run stays reproducible.
+        s = self.seed if self.seed is None else self.seed + self.level
+        self.nodes = simulate_level(self.rows, seed=s, **self.kw)
+
+    def __call__(self):
+        # copy the list so the caller can't mutate our web; the Node objects stay shared so
+        # consume() can match the bought one by identity.
+        return None, None, list(self.nodes)
+
+    def consume(self, node):
+        # a node was bought: drop it from the current web (same objects we handed out).
+        self.nodes = [n for n in self.nodes if n is not node]
+
+    def advance(self):
+        # priorities exhausted, dbd auto-spends the rest: model that as moving to the next level.
+        self.level += 1
+        self._draw()
+
+
+def sim_source(rows, **kw):
+    """build a stateful () -> (frame, region, nodes) source backed by the offline simulator."""
+    return SimSource(rows, **kw)

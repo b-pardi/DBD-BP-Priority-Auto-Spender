@@ -11,7 +11,7 @@ Node also owns the observed-vs-matched reconciliation. rarity comes from the dis
 (authoritative live read) and category from the matched icon (the only thing that can
 split item from addon, since both are square sockets). when those two sources disagree,
 or the icon match is weak, the node is flagged needs_resolution so the loop can fall back
-to an ocr tooltip-hover scan to settle identity (see ocr.resolve_by_hover). that fallback
+to an ocr tooltip-hover scan to settle identity (see ocr.find_node_tooltip). that fallback
 replaces a pure confidence gate: both weak matches and observed/matched misalignment get
 routed to ocr instead of being guessed at.
 """

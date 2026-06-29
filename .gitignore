@@ -2,12 +2,15 @@ __pycache__/
 *.pyc
 *.pyo
 .venv/
-env/
+*env/
 
 # scraped icon library is large and fully regenerable from src/scraper.py
 data/icons/*
 !data/icons/.gitkeep
 data/icons_index.json
+
+# ncc template cache, rebuilt on demand from the sprites by detect.load_ncc_templates
+data/*.ncc*.npy
 
 # saved bloodweb screenshots for offline tests can be large
 tests/fixtures/*.png

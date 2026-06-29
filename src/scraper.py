@@ -64,6 +64,19 @@ PREFIXES = {
 # so tag them 'event' directly (lets the soft cross-check + priority rules target them).
 EVENT_PREFIXES = {"IconsFavors_"}
 
+# event icons the curated Icon* prefixes don't cover: the newest event content is only on the
+# wiki as raw 'T_UI_' texture uploads (no curated IconItems_ redirect yet), so the prefix
+# enumeration never sees it. list those explicitly -- by exact File: name -> (key, category) --
+# because the in-game names ('Banquet ...') don't derive from the texture stem, and identity is
+# read from the glyph so the key is just a stable id. all are tagged 'event'. add a line per new
+# event icon, then re-scrape to fetch + hash them. (the 2026 10th-anniversary "Black Banquet".)
+EXTRA_EVENT_ICONS = {
+    "T_UI_iconItems_toolbox_anniversary2026.png":     ("banquetToolbox",   "item"),
+    "T_UI_iconItems_flashlight_anniversary2026.png":  ("banquetFlashlight", "item"),
+    "T_UI_iconItems_medkit_anniversary2026.png":      ("banquetMedKit",    "item"),
+    "T_UI_iconItems_poison_anniversary2026.png":      ("banquetPoison",    "item"),
+}
+
 # repo root is two levels up (src/scraper.py -> repo root), so defaults land in data/
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "data" / "icons"
@@ -190,6 +203,49 @@ def download_icon(session, url, dest: Path, attempts=3):
     return None
 
 
+def resolve_image_urls(session, filenames):
+    """canonical download url for each bare image filename, via the imageinfo api. used for the
+    EXTRA_EVENT_ICONS, which live under raw T_UI_ texture names we don't enumerate by prefix, so
+    we look them up by exact File: title instead of paging allimages. returns {filename: url}."""
+    titles = "|".join(f"File:{f}" for f in filenames)
+    data = session.get(API, params={
+        "action": "query", "format": "json",
+        "prop": "imageinfo", "iiprop": "url", "titles": titles,
+    }, timeout=30).json()
+    out = {}
+    for pg in data.get("query", {}).get("pages", {}).values():
+        info = pg.get("imageinfo")
+        if info:  # mediawiki normalizes underscores to spaces in title; put them back to match
+            out[pg["title"].split(":", 1)[1].replace(" ", "_")] = info[0]["url"]
+    return out
+
+
+def _index_one(session, url, key, name, category, rarity, out_dir, index_path, force, delay, skipped):
+    """download (or reuse the cached) icon and build its index row, or None if it won't decode.
+    shared by the prefix-enumerated icons and the explicit EXTRA_EVENT_ICONS so both sides frame
+    the row + phash identically. appends to skipped on an undecodable asset."""
+    dest = out_dir / category / f"{key}.png"
+    if dest.exists() and not force:
+        img = Image.open(dest).convert("RGBA")
+    else:
+        img = download_icon(session, url, dest)
+        if img is None:                      # undecodable asset, log it and move on
+            skipped.append(key)
+            return None
+        time.sleep(delay)                    # be polite to the wiki between downloads
+    return {
+        "key": key,
+        "name": name,
+        "category": category,
+        "rarity": rarity,
+        # relative to the index file so the library stays portable; detect resolves it
+        # against index_path.parent
+        "file": os.path.relpath(dest, index_path.parent).replace("\\", "/"),
+        "phash": icon_phash(img),
+        "url": url,
+    }
+
+
 def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False, delay=0.1, dedup=True):
     session = _session()
     prefixes = {p: c for p, c in PREFIXES.items() if c in categories}
@@ -200,34 +256,32 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
     index = []
     skipped = []
     for prefix, category in prefixes.items():
-        icons = list_icons(session, prefix, limit=limit)
-        for entry in tqdm(icons, desc=category, unit="icon"):
-            fname = entry["name"]            # e.g. IconPerks_EyesOfBelmont.png
-            stem = fname[len(prefix):]       # EyesOfBelmont.png
-            key = Path(stem).stem            # EyesOfBelmont
-            dest = out_dir / category / f"{key}.png"
-            if dest.exists() and not force:
-                img = Image.open(dest).convert("RGBA")
-            else:
-                img = download_icon(session, entry["url"], dest)
-                if img is None:              # undecodable asset, log it and move on
-                    skipped.append(fname)
-                    continue
-                time.sleep(delay)            # be polite to the wiki between downloads
+        for entry in tqdm(list_icons(session, prefix, limit=limit), desc=category, unit="icon"):
+            key = Path(entry["name"][len(prefix):]).stem   # IconPerks_EyesOfBelmont.png -> EyesOfBelmont
             name = prettify(key)
-            index.append({
-                "key": key,
-                "name": name,
-                "category": category,
-                # event prefixes -> 'event' (gold tier, no wiki rarity category); else the
-                # wiki rarity, or null for perks/powers and ~visceral top-tier icons
-                "rarity": "event" if prefix in EVENT_PREFIXES else rmap.get(category, {}).get(_norm(name)),
-                # relative to the index file so the library stays portable; detect
-                # resolves it against index_path.parent
-                "file": os.path.relpath(dest, index_path.parent).replace("\\", "/"),
-                "phash": icon_phash(img),
-                "url": entry["url"],
-            })
+            # event prefixes -> 'event' (gold tier, no wiki rarity category); else the wiki
+            # rarity, or null for perks/powers and ~visceral top-tier icons
+            rarity = "event" if prefix in EVENT_PREFIXES else rmap.get(category, {}).get(_norm(name))
+            row = _index_one(session, entry["url"], key, name, category, rarity,
+                             out_dir, index_path, force, delay, skipped)
+            if row:
+                index.append(row)
+
+    # explicit event icons the prefixes miss (raw T_UI_ textures); look them up by exact name
+    # and tag 'event'. skip ones whose category wasn't requested so --categories stays honest.
+    extras = {f: kc for f, kc in EXTRA_EVENT_ICONS.items() if kc[1] in categories}
+    if extras:
+        extra_urls = resolve_image_urls(session, list(extras))
+        for fname, (key, category) in extras.items():
+            url = extra_urls.get(fname)
+            if url is None:                  # not found on the wiki (renamed/removed), log + skip
+                skipped.append(fname)
+                continue
+            row = _index_one(session, url, key, prettify(key), category, "event",
+                             out_dir, index_path, force, delay, skipped)
+            if row:
+                index.append(row)
+
     if dedup:
         index = dedup_index(index)
     index.sort(key=lambda row: (row["category"], row["key"]))

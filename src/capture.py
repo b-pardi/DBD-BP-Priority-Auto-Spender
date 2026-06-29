@@ -30,6 +30,25 @@ def grab_bloodweb(region=None):
     ss = np.asarray(ss)[:,:,:3] # (h,w,(bgr))
     return ss
 
+
+def grab_with_region(region=None):
+    """like grab_bloodweb but also return the region dict, so callers can map frame coords back to screen coords for clicking.
+    returns (frame_bgr (h, w, 3), region), where region has keys left, top, width, height in mss virtual-screen coords."""
+    sct = get_sct()
+    region = sct.primary_monitor if region is None else region
+    ss = np.asarray(sct.grab(region))[:, :, :3]
+    return ss, region
+
+
+def frame_to_screen(x, y, region, crop_origin=(0, 0)):
+    """map a detection frame coord to an absolute screen coord for input_control.
+    region is what grab_with_region returned, and crop_origin is the (x0, y0) offset if detect ran on a sub-crop of the frame (it is (0, 0) when detecting on the full grab).
+    the screen origin is the primary monitor's top-left, which matches pydirectinput's coord space.
+    this is usually identity for a full primary-monitor grab, so it mainly exists so a future sub-region or cropped detect still clicks the right pixel."""
+    cx, cy = crop_origin
+    return int(round(x + cx + region["left"])), int(round(y + cy + region["top"]))
+
+
 if __name__ == '__main__':
     out_dir = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
     out_dir.mkdir(parents=True, exist_ok=True)

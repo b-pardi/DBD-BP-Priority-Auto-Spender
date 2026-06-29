@@ -12,12 +12,28 @@ present it clicks the center auto-spend to finish the level and move on.
 
 ## Status
 
+#### Pre-Alpha (earliest possible working version tuned for one setup)
+
 - [x] scaffold + requirements
 - [x] scraper: pull all icons + metadata from deadbydaylight.wiki.gg
 - [x] detect: localize nodes, read rarity, identify icon (offline, on fixtures)
-- [ ] priority: rank detected nodes, pick the next buy or the auto-spend fallback
-- [ ] spender: live capture/click loop, ocr stop-threshold, kill switch
+- [x] match: match nodes with p-hashing/NCC
+    - [x] OCR fall back method to detect difficult nodes
+- [x] priority: rank detected nodes, pick the next buy or the auto-spend fallback
+- [x] spender: live capture/click loop, ocr stop-threshold, kill switch
 - [ ] ui: user interface for defining priorities and general program settings
+
+---
+
+#### Alpha (ready for small test group)
+- [ ] make robust across resolutions
+- [ ] detect: switch to custom trained CNN
+    - [ ] data labelling util
+    - [ ] train model
+    - [ ] integrate model
+- [ ] node detection/extraction v2
+- [ ] auto determine bbox for bloodweb frame crop.
+- [ ] (if needed) HSV calibration/fine tuning option for color masking
 
 ## setup
 
@@ -57,6 +73,21 @@ python -m src.scraper
 
 # test node detection on a screenshot of the dbd bloodweb (note detect.py has crop bounds that may need adjustment for now)
 python -m src.detect detect path/to/screenshot.png
+
+# view gallery image of all nodes detected and their predictions
+python -m src.detect glpyhs path/to/screenshot.png
+
+# run detections on simulated bloodweb levels (i.e. a 'perfect' bloodweb node detection)
+python -m src.spender --sim
+
+# EARLY VERSION MAY NOT WORK PROPERLY
+# run the auto spender as functionally intended
+# begins listening for start key (default F7) to start scanning and clicking nodes,
+# and kill key (default F8) to cut the program
+python -m src.spender --live 
+
+# to run the spender without clicking anything as a test run
+python -m src.spender --dry-run # note dry run is the default
 ```
 
 ## How It Works

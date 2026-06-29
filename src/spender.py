@@ -23,7 +23,7 @@ import ctypes
 from ctypes import wintypes
 from pathlib import Path
 
-from . import capture, detect, input_control, ocr
+from . import capture, detect, input_control, ocr, paths
 from .node import Node
 from .sim import sim_source
 
@@ -33,7 +33,7 @@ SETTLE_S = 0.6       # post-buy wait before the rescan, tune live like input_con
 IDLE_POLL_S = 0.05   # how often the loop re-checks the switch while idle or paused
 REPICK_TOL_PX = 20   # spot-match tolerance for the don't-repick guard, tune with node spacing
 
-DEFAULT_CONFIG = Path(__file__).resolve().parent.parent / "config" / "priority.json"
+DEFAULT_CONFIG = paths.config_path()   # frozen-aware: repo config/ in dev, %APPDATA%/dbdbp when frozen
 VALID_CATEGORIES = {"item", "addon", "offering", "perk", "power"}
 VALID_RARITIES = {"common", "uncommon", "rare", "very rare", "ultra rare", "event"}
 # win32 global-hotkey plumbing for the run control.
@@ -116,6 +116,12 @@ class Switch:
         self._running.clear()
         self._killed.set()
 
+    def reset(self):
+        """clear the latched kill (and running) so a ui can start a fresh run after a stop without
+        re-registering the global hotkeys. the listener thread and key bindings stay armed."""
+        self._killed.clear()
+        self._running.clear()
+
     @property
     def running(self):
         """is the loop cleared to do work this iteration? false while idle, paused, or killed."""
@@ -127,42 +133,75 @@ class Switch:
         return self._killed.is_set()
 
 
+def _validate_rule(rule, where="rule"):
+    """validate one priority rule dict, raising ValueError with a locating prefix on a bad field.
+    a rule is an item (name + optional rarity) or a category (category + optional rarity)."""
+    kind = rule.get("type")
+    if kind == "item":
+        if not rule.get("name"):
+            raise ValueError(f"{where}: item rule needs a 'name'")
+    elif kind == "category":
+        if rule.get("category") not in VALID_CATEGORIES:
+            raise ValueError(f"{where}: category must be one of {sorted(VALID_CATEGORIES)}")
+    else:
+        raise ValueError(f"{where}: type must be 'item' or 'category', got {kind!r}")
+    rarity = rule.get("rarity")
+    if rarity is not None and rarity not in VALID_RARITIES:
+        raise ValueError(f"{where}: bad rarity {rarity!r}")
+
+
 def load_config(path=None):
-    """read and lightly validate the priority config.
-    returns the parsed dict {dry_run, stop_bp_threshold, priorities: [rule, ...]}.
-    raises ValueError on a malformed rule, so a bad config fails fast at startup instead
-    of silently never matching mid-run."""
+    """read and lightly validate the priority config (schema v2: tiered).
+    `priorities` is an ordered list of tiers, each tier a list of rule dicts; within a tier the
+    engine picks randomly across every matching node (no within-tier order, see choose_next).
+    a v1 config (a flat list of rule dicts) is migrated on read by wrapping each rule in its own
+    singleton tier, so old files still load with identical strict-rank semantics.
+    returns the parsed dict; raises ValueError on a malformed rule and lets a missing file raise
+    FileNotFoundError, so a bad config fails fast at startup instead of silently never matching."""
     path = Path(path) if path else DEFAULT_CONFIG
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
 
-    for i, rule in enumerate(cfg.get("priorities", [])):
-        kind = rule.get("type")
-        if kind == "item":
-            if not rule.get("name"):
-                raise ValueError(f"priority[{i}]: item rule needs a 'name'")
-        elif kind == "category":
-            if rule.get("category") not in VALID_CATEGORIES:
-                raise ValueError(
-                    f"priority[{i}]: category must be one of {sorted(VALID_CATEGORIES)}"
-                )
-        else:
-            raise ValueError(f"priority[{i}]: type must be 'item' or 'category', got {kind!r}")
-        rarity = rule.get("rarity")
-        if rarity is not None and rarity not in VALID_RARITIES:
-            raise ValueError(f"priority[{i}]: bad rarity {rarity!r}")
+    # migrate v1 (flat list of rule dicts) -> v2 (list of tiers): a dict entry becomes a singleton
+    # tier, a list entry is already a v2 tier and passes through.
+    tiers = [[entry] if isinstance(entry, dict) else entry for entry in cfg.get("priorities", [])]
+    cfg["priorities"] = tiers
+
+    for t, tier in enumerate(tiers):
+        if not isinstance(tier, list):
+            raise ValueError(f"priorities[{t}]: tier must be a list of rules")
+        for i, rule in enumerate(tier):
+            _validate_rule(rule, where=f"priorities[{t}][{i}]")
 
     cfg.setdefault("dry_run", True)
     cfg.setdefault("stop_bp_threshold", 0)
     return cfg
 
 
+def save_config(cfg, path=None):
+    """write the priority+settings config back as json (schema v2), validating first so we never
+    persist a broken file. round-trips what load_config returns and stays human-editable (indent=2).
+    the ui calls this on Save; it is the single serializer for the file."""
+    path = Path(path) if path else DEFAULT_CONFIG
+    for t, tier in enumerate(cfg.get("priorities", [])):
+        if not isinstance(tier, list):
+            raise ValueError(f"priorities[{t}]: tier must be a list of rules")
+        for i, rule in enumerate(tier):
+            _validate_rule(rule, where=f"priorities[{t}][{i}]")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    return path
+
+
 # node sources from live capture
-def live_source(rows, ncc_templates, region=None, matcher="ncc"):
-    """build a () -> (frame, region, nodes) source backed by the real screen + detect()."""
+def live_source(rows, ncc_templates, region=None, matcher="ncc", debug=False,
+                thresh_method="adaptive_gaussian"):
+    """build a () -> (frame, region, nodes) source backed by the real screen + detect().
+    matcher/debug/thresh_method come from config so the settings ui controls the live detect call."""
     def _source():
         frame, reg = capture.grab_with_region(region)
-        dets = detect.detect(frame, rows=rows, ncc_templates=ncc_templates, matcher=matcher)
+        dets = detect.detect(frame, rows=rows, ncc_templates=ncc_templates, matcher=matcher,
+                             debug=debug, thresh_method=thresh_method)
         nodes = [Node.from_detection(d) for d in dets]
         return frame, reg, nodes
     return _source
@@ -184,13 +223,13 @@ def resolve_uncertain(nodes, frame, region, rows):
 
 def choose_next(nodes, config):
     """return the highest-priority Node to buy, or None for center auto-spend.
-    walks the ordered rules high to low and returns a random node among those matching the first
-    rule that hits (random tie-break by design, inner/cheaper nodes tend to be lower quality).
-    returns one node, the loop rescans after each buy; the don't-repick guard lives in the loop
-    so this stays a pure function of the current node list.
+    walks the tiers high to low and, for the first tier with any matching node, returns a random
+    choice across every node matching any rule in that tier (random within a tier by design,
+    inner/cheaper nodes tend to be lower quality). returns one node, the loop rescans after each
+    buy; the don't-repick guard lives in the loop so this stays a pure function of the node list.
     """
-    for rule in config.get("priorities", []):
-        hits = [n for n in nodes if n.matches(rule)]
+    for tier in config.get("priorities", []):
+        hits = [n for n in nodes if any(n.matches(rule) for rule in tier)]
         if hits:
             return random.choice(hits)
     return None
@@ -257,6 +296,7 @@ def run(source, config, switch, rows, click=True):
     them); live_source has neither and relies on the screen changing after the auto-spend."""
     dry_run = not click
     bp_floor = config.get("stop_bp_threshold", 0)  # 0 disables the bp stop
+    settle_s = config.get("settle_s", SETTLE_S)    # post-buy wait, tunable from the settings ui
     consume = getattr(source, "consume", None)     # stateful-source hooks, absent on live_source
     advance = getattr(source, "advance", None)
     while not switch.killed:
@@ -295,7 +335,7 @@ def run(source, config, switch, rows, click=True):
             spent.append((choice.x, choice.y))   # remember the spot so we don't re-pick it
             if consume:
                 consume(choice)                  # sim drops it from the web; live no-op
-            _interruptible_sleep(switch, SETTLE_S)  # let the buy animation play before the next
+            _interruptible_sleep(switch, settle_s)  # let the buy animation play before the next
 
         if switch.killed:                 # killed: bail before the auto-spend
             break
@@ -309,7 +349,7 @@ def run(source, config, switch, rows, click=True):
             do_auto_spend(nodes, frame, region)
         if advance:
             advance()                     # sim draws the next level; live no-op
-        _interruptible_sleep(switch, SETTLE_S)
+        _interruptible_sleep(switch, settle_s)
 
 
 def main():
@@ -321,11 +361,17 @@ def main():
     ap.add_argument("--live", action="store_true",
                     help="actually click in-game, overriding the config dry_run safety default")
     ap.add_argument("--config", default=None, help="path to priority.json (default: config/priority.json)")
-    ap.add_argument("--matcher", default="ncc", help="detect matcher: ncc | ncc_masked | phash")
+    ap.add_argument("--matcher", default=None,
+                    help="detect matcher: ncc | ncc_masked | phash (overrides config; default ncc)")
     args = ap.parse_args()
 
     config = load_config(args.config)
     rows, _ = detect.load_index()
+
+    # detect knobs come from config so the settings ui owns them; --matcher still overrides.
+    matcher = args.matcher or config.get("matcher", "ncc")
+    debug = config.get("debug", False)
+    thresh_method = config.get("thresh_method", "adaptive_gaussian")
 
     # safety: stay in dry-run unless explicitly sent live. --sim and --dry-run are always dry,
     # --live forces real clicks, otherwise fall back to the config dry_run (defaults True).
@@ -350,8 +396,9 @@ def main():
         # and no, I didn't have to google how to spell hemorrhage (I did)
         source = sim_source(rows, seed=0, low_conf_frac=0.2, discrepancy_frac=0.1)
     else:
-        ncc_templates = detect.load_ncc_templates(rows) if args.matcher.startswith("ncc") else None
-        source = live_source(rows, ncc_templates, matcher=args.matcher)
+        ncc_templates = detect.load_ncc_templates(rows) if matcher.startswith("ncc") else None
+        source = live_source(rows, ncc_templates, matcher=matcher, debug=debug,
+                             thresh_method=thresh_method)
     run(source, config, switch, rows, click=not dry_run)
 
 

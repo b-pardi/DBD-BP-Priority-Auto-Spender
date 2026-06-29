@@ -3,10 +3,104 @@
   "dry_run": true,
   "stop_bp_threshold": 0,
   "priorities": [
-    { "type": "item", "name": "Flashlight", "rarity": "very rare" },
-    { "type": "item", "name": "Commodious Toolbox" },
-    { "type": "category", "category": "item", "rarity": "ultra rare" },
-    { "type": "category", "category": "addon", "rarity": "very rare" },
-    { "type": "category", "category": "offering" }
-  ]
+    [
+      {
+        "type": "item",
+        "name": "focus Lens",
+        "rarity": "uncommon"
+      },
+      {
+        "type": "item",
+        "name": "high-End Sapphire Lens",
+        "rarity": "very rare"
+      }
+    ],
+    [
+      {
+        "type": "item",
+        "name": "Flashlight",
+        "rarity": "very rare"
+      },
+      {
+        "type": "item",
+        "name": "sport Flashlight",
+        "rarity": "rare"
+      },
+      {
+        "type": "item",
+        "name": "flashlight",
+        "rarity": "uncommon"
+      }
+    ],
+    [
+      {
+        "type": "item",
+        "name": "long Life Battery",
+        "rarity": "rare"
+      },
+      {
+        "type": "item",
+        "name": "heavy Duty Battery",
+        "rarity": "uncommon"
+      }
+    ],
+    [
+      {
+        "type": "item",
+        "name": "ranger Med Kit",
+        "rarity": "very rare"
+      },
+      {
+        "type": "item",
+        "name": "emergency Med Kit",
+        "rarity": "rare"
+      },
+      {
+        "type": "item",
+        "name": "banquet Med Kit",
+        "rarity": "event"
+      },
+      {
+        "type": "item",
+        "name": "first Aid Kit",
+        "rarity": "uncommon"
+      },
+      {
+        "type": "item",
+        "name": "alexs Toolbox",
+        "rarity": "very rare"
+      },
+      {
+        "type": "item",
+        "name": "banquet Toolbox",
+        "rarity": "event"
+      },
+      {
+        "type": "item",
+        "name": "commodious Toolbox",
+        "rarity": "rare"
+      },
+      {
+        "type": "item",
+        "name": "engineers Toolbox",
+        "rarity": "very rare"
+      },
+      {
+        "type": "item",
+        "name": "mechanics Toolbox",
+        "rarity": "rare"
+      },
+      {
+        "type": "item",
+        "name": "cutting Wire",
+        "rarity": "uncommon"
+      },
+      {
+        "type": "item",
+        "name": "grip Wrench",
+        "rarity": "rare"
+      }
+    ]
+  ],
+  "debug": true
 }

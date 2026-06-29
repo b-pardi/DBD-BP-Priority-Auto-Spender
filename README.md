@@ -1,4 +1,5 @@
-# dbd bloodweb priority auto-spender
+# Dead By Daylight BloodWeb Priority Auto-Spender 
+## DBD-BW-PAS
 
 windows/python tool that watches the dead by daylight bloodweb on screen and auto-buys
 nodes in the order you care about. you give it a priority list (specific items like
@@ -35,19 +36,17 @@ present it clicks the center auto-spend to finish the level and move on.
 - [ ] auto determine bbox for bloodweb frame crop.
 - [ ] (if needed) HSV calibration/fine tuning option for color masking
 
-## setup
+## Setup
 
-uses a conda env named `dbdbp-env`.
+uses a conda env named `dbdbp`
 
-1. Create Virtual Environment:
-- Python venv: `python -m pip venv dbdbp-env`
-OR
-- Anaconda: `conda activate dbdbp-env`
+Anaconda recommended:
+`conda env create -f environment.yml`
+`conda activate dbdbp`
 
-2. Install requirements: `pip install -r requirements.txt`
+One can use a python venv with version 3.11 and download all the pkgs in `environment.yml`, using special care when it comes to [pytesseroc](https://pypi.org/project/tesserocr/)
 
-the bp-counter ocr also needs the tesseract binary installed system-wide:
-https://github.com/UB-Mannheim/tesseract/wiki (pytesseract just wraps it).
+Note in either case, the Tesseract binary is _not_ required to be installed system wide, pytesseroc is cool and nice and comes with the tesseract C bins (hence the special attention to installing it for your specific windows platform).
 
 ## layout
 
@@ -67,6 +66,7 @@ tests/fixtures/           saved bloodweb screenshots for offline detection tests
 
 ## usage (in progress)
 
+**Ensure all CMDs are run from the project root dir (`<path/to/dbd_bp_prioritized_auto_spender/>`) and that the conda environment is activated (`conda activate dbdbp`)**
 ```
 # build the icon library (run once, re-run after a dbd content patch)
 python -m src.scraper
@@ -88,13 +88,18 @@ python -m src.spender --live
 
 # to run the spender without clicking anything as a test run
 python -m src.spender --dry-run # note dry run is the default
+
+# to run the ui from python and not the exe
+python -m ui
 ```
 
 ## How It Works
 
 ### Detecting nodes on screen in the bloodweb
 
-### Matching nodes with wiki references
+### Matching nodes with wiki references 
+
+#### Getting the wiki references
 
 ### Priority Selection
 

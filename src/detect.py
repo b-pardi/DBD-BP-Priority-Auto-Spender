@@ -15,6 +15,8 @@ import imagehash
 from PIL import Image
 import matplotlib.pyplot as plt
 
+from . import paths
+
 ROOT = Path(__file__).resolve().parent.parent
 USR_HSV = ROOT / "usr" / "rarity-HSVs.json"         # active anchors, evolve per user each web
 DEFAULT_INDEX = ROOT / "data" / "icons_index.json"
@@ -230,7 +232,9 @@ def load_ncc_templates(rows, index_path=DEFAULT_INDEX, res=NCC_RES):
     """build (or load cached) the ncc template matrix: each library sprite -> a res*res grayscale vector,
     returns (T, T2): T = (n, res*res) float32 raw vectors,
     T2 = T**2 (reused for the masked-cosine template norms)"""
-    cache = Path(index_path).with_suffix(f".ncc{res}.npy")
+    # cache in the writable cache dir (repo data/ in dev, %APPDATA%/dbdbp/cache when frozen) so the
+    # save works even when the bundled index sits in a read-only dir.
+    cache = paths.cache_dir() / f"{Path(index_path).stem}.ncc{res}.npy"
     if cache.is_file() and cache.stat().st_mtime >= Path(index_path).stat().st_mtime:
         T = np.load(cache)
         if T.shape == (len(rows), res * res):
@@ -240,9 +244,10 @@ def load_ncc_templates(rows, index_path=DEFAULT_INDEX, res=NCC_RES):
     for i, r in enumerate(rows):
         T[i] = _glyph_to_vec(_sprite_glyph_gray(base / r["file"]), res)
     try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
         np.save(cache, T)
     except OSError:
-        pass # read-only data dir (e.g. frozen exe) -- just rebuild next run
+        pass # read-only cache dir (e.g. frozen exe) -- just rebuild next run
     return T, T * T
 
 
@@ -442,10 +447,12 @@ def sample_disk_hsv(hsv, x, y, r, s_floor=30, v_floor=20, min_px=6):
     return np.array([h_med, np.median(px[:, 1]), np.median(px[:, 2])])
 
 
-def find_nodes_in_frame(frame, debug=False, max_anchor_dist=None):
-    """find all circles in the blood web and clean them up to identify clickable nodes"""
+def find_nodes_in_frame(frame, debug=False, max_anchor_dist=None, thresh_method='adaptive_gaussian'):
+    """find all circles in the blood web and clean them up to identify clickable nodes.
+    thresh_method picks the binarization find_circles uses (adaptive_gaussian|otsu|canny), threaded
+    from detect() so the settings ui can tune it."""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) # (H,W,3), for the per-circle color read
-    circles = find_circles(frame, debug=False) # list of (x, y, r)
+    circles = find_circles(frame, thresh_method=thresh_method, debug=False) # list of (x, y, r)
 
     nodes = []
     for x, y, r in circles:
@@ -618,11 +625,13 @@ def classify_socket(node_contours, poly_tol=0.05):
         return 'square'
 
 
-def detect(frame, rows=None, hashes=None, ncc_templates=None, matcher="ncc", r_tol=1.5, debug=False):
+def detect(frame, rows=None, hashes=None, ncc_templates=None, matcher="ncc", r_tol=1.5,
+           debug=False, thresh_method="adaptive_gaussian"):
     """full pipeline; returns per-node dicts {x, y, r, rar, cat, glyph_bgr, match, score, margin,
     matcher}. matcher picks identification: 'ncc' (default, plain z-normed cosine, higher=better),
     'ncc_masked' (cosine over the query's bright strokes, higher=better), or 'phash' (hamming,
-    lower=better). score's direction follows the matcher (see _score_str)."""
+    lower=better). score's direction follows the matcher (see _score_str). thresh_method picks the
+    node-localization binarization (adaptive_gaussian|otsu|canny), passed down to find_circles."""
     if rows is None:
         rows, hashes = load_index()
     if matcher == "phash" and hashes is None:
@@ -632,7 +641,7 @@ def detect(frame, rows=None, hashes=None, ncc_templates=None, matcher="ncc", r_t
     ncc_plain_T = ncc_plain_templates(ncc_templates) if matcher == "ncc" else None
 
     cats = np.array([r['category'] for r in rows]) # (n,) strings of 'item', 'perk', ...
-    nodes = find_nodes_in_frame(frame, debug=debug) # [(x, y, r, rarity), ...]
+    nodes = find_nodes_in_frame(frame, debug=debug, thresh_method=thresh_method) # [(x, y, r, rarity), ...]
 
     res = []
     # the center auto-spend node is found by its own glow color, not the disk pipeline, and gets
@@ -792,7 +801,8 @@ def _show(
     plt.title(title)
 
     if savefig:
-        plt.savefig(f".tmp/{title}.png", dpi=200)
+        paths.debug_dir().mkdir(parents=True, exist_ok=True)
+        plt.savefig(str(paths.debug_dir() / f"{title}.png"), dpi=200)
         plt.close(fig)   # close it, else a later plt.show() from another _show pops this up too
     else:
         plt.show()
@@ -827,7 +837,8 @@ def _show_gallery(items, title="glyphs", cols=6, savefig=False):
     fig.suptitle(title)
     fig.tight_layout()
     if savefig:
-        fig.savefig(f".tmp/{title}.png", dpi=200)
+        paths.debug_dir().mkdir(parents=True, exist_ok=True)
+        fig.savefig(str(paths.debug_dir() / f"{title}.png"), dpi=200)
         plt.close(fig)
     else:
         plt.show()

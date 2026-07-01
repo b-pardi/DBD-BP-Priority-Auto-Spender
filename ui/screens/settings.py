@@ -10,9 +10,10 @@ import tkinter.messagebox as messagebox
 
 import customtkinter as ctk
 
-from src import detect, spender
+from src import detect, ocr, spender
 
 from .. import config_io, theme
+from ..widgets import tooltip
 
 CNN_PLACEHOLDER = "CNN (coming soon)"
 
@@ -36,6 +37,12 @@ class SettingsScreen(ctk.CTkFrame):
         ctk.CTkSwitch(form, text="Enable debugging (shows the Debug view)",
                       variable=self.debug_var, command=self._on_debug_toggle).grid(
             row=0, column=0, columnspan=2, sticky="w", padx=theme.PAD, pady=theme.PAD)
+
+        # show hover tooltips (the wiki lead sentence on library cards / tier chips)
+        self.tooltips_var = ctk.BooleanVar(value=bool(cfg.get("show_tooltips", True)))
+        ctk.CTkSwitch(form, text="Show tooltips on hover",
+                      variable=self.tooltips_var, command=self._on_tooltips_toggle).grid(
+            row=9, column=0, columnspan=2, sticky="w", padx=theme.PAD, pady=theme.PAD)
 
         # keybinds
         ctk.CTkLabel(form, text="Start / pause hotkey", anchor="w").grid(
@@ -61,7 +68,7 @@ class SettingsScreen(ctk.CTkFrame):
         self.matcher.set(cfg.get("matcher", "ncc"))
         self.matcher.grid(row=3, column=1, sticky="w", padx=theme.PAD, pady=4)
 
-        # binarization method
+        # binarization method (the thresholding find_circles preprocesses with)
         ctk.CTkLabel(form, text="Binarization method", anchor="w").grid(
             row=4, column=0, sticky="w", padx=theme.PAD, pady=4)
         self.thresh = ctk.CTkOptionMenu(
@@ -69,12 +76,34 @@ class SettingsScreen(ctk.CTkFrame):
         self.thresh.set(cfg.get("thresh_method", "adaptive_gaussian"))
         self.thresh.grid(row=4, column=1, sticky="w", padx=theme.PAD, pady=4)
 
-        # post-buy settle wait
-        ctk.CTkLabel(form, text="Post-buy settle wait (seconds)", anchor="w").grid(
+        # node-localization method: the contour pass (default) vs opencv HoughCircles (detect.py)
+        ctk.CTkLabel(form, text="Node detection", anchor="w").grid(
             row=5, column=0, sticky="w", padx=theme.PAD, pady=4)
+        self.node_finder = ctk.CTkOptionMenu(form, width=180, values=["contours", "hough"])
+        self.node_finder.set(cfg.get("node_finder", "contours"))
+        self.node_finder.grid(row=5, column=1, sticky="w", padx=theme.PAD, pady=4)
+
+        # post-buy settle wait: pause after each buy before the next pick on the same web
+        ctk.CTkLabel(form, text="Post-buy settle wait (seconds)", anchor="w").grid(
+            row=6, column=0, sticky="w", padx=theme.PAD, pady=4)
         self.settle = ctk.CTkEntry(form, width=120)
         self.settle.insert(0, str(cfg.get("settle_s", spender.SETTLE_S)))
-        self.settle.grid(row=5, column=1, sticky="w", padx=theme.PAD, pady=4)
+        self.settle.grid(row=6, column=1, sticky="w", padx=theme.PAD, pady=4)
+
+        # ocr tooltip wait: how long to let dbd's name tooltip fade in before reading it.
+        # raise this if a live run logs a lot of failed ocr reads.
+        ctk.CTkLabel(form, text="OCR tooltip wait (seconds)", anchor="w").grid(
+            row=7, column=0, sticky="w", padx=theme.PAD, pady=4)
+        self.hover = ctk.CTkEntry(form, width=120)
+        self.hover.insert(0, str(cfg.get("ocr_hover_s", ocr.HOVER_DELAY_S)))
+        self.hover.grid(row=7, column=1, sticky="w", padx=theme.PAD, pady=4)
+
+        # level transition wait: pause after the center auto-spend for the fill + next web to render
+        ctk.CTkLabel(form, text="Level transition wait (seconds)", anchor="w").grid(
+            row=8, column=0, sticky="w", padx=theme.PAD, pady=4)
+        self.advance = ctk.CTkEntry(form, width=120)
+        self.advance.insert(0, str(cfg.get("advance_s", spender.ADVANCE_S)))
+        self.advance.grid(row=8, column=1, sticky="w", padx=theme.PAD, pady=4)
 
         ctk.CTkButton(self, text="Save settings", command=self._save).pack(
             anchor="w", padx=theme.PAD, pady=theme.PAD)
@@ -84,6 +113,13 @@ class SettingsScreen(ctk.CTkFrame):
         if self.app.app_state.config is not None:
             self.app.app_state.config["debug"] = bool(self.debug_var.get())
         self.app.refresh_nav()
+
+    def _on_tooltips_toggle(self):
+        # apply live (the gate is a module flag) so hovering reflects the switch before Save.
+        on = bool(self.tooltips_var.get())
+        if self.app.app_state.config is not None:
+            self.app.app_state.config["show_tooltips"] = on
+        tooltip.set_enabled(on)
 
     def _on_matcher(self, value):
         if value == CNN_PLACEHOLDER:  # not built yet -> bounce back to the previous real matcher
@@ -116,11 +152,16 @@ class SettingsScreen(ctk.CTkFrame):
         cfg["kill_key"] = self.kill_btn.cget("text")
         cfg["matcher"] = self.matcher.get()
         cfg["thresh_method"] = self.thresh.get()
-        try:
-            cfg["settle_s"] = float(self.settle.get())
-        except ValueError:
-            messagebox.showerror("invalid value", "settle wait must be a number (seconds).")
-            return
+        cfg["node_finder"] = self.node_finder.get()
+        cfg["show_tooltips"] = bool(self.tooltips_var.get())
+        for key, entry, label in (("settle_s", self.settle, "settle wait"),
+                                  ("ocr_hover_s", self.hover, "OCR tooltip wait"),
+                                  ("advance_s", self.advance, "level transition wait")):
+            try:
+                cfg[key] = float(entry.get())
+            except ValueError:
+                messagebox.showerror("invalid value", f"{label} must be a number (seconds).")
+                return
         try:
             config_io.save(cfg)
         except ValueError as e:

@@ -17,7 +17,13 @@ dedup -> write. just `python -m src.scraper`.
 
 writes:
   data/icons/<category>/<key>.png   the raw sprite
-  data/icons_index.json             one row per icon: key, name, category, rarity, file, phash, url
+  data/icons_index.json             one row per icon: key, name, category, rarity, obtainable,
+                                    desc, file, phash, url
+
+obtainable ('normal'|'event'|'unavailable') + desc (the wiki lead-sentence tooltip) are pulled in
+the same pass: obtainability from the wiki's retired/event categories (+ powers by category), desc
+from the TextExtracts api. both let the ui hide glyphs you can't currently buy and show a hover
+description; detection ignores them.
 
 the phash is precomputed here (via normalize_sprite, kept in sync with detect.normalize_glyph)
 so nearest-neighbor lookup at detect time is a cheap hamming distance over ~2k templates,
@@ -42,6 +48,8 @@ from PIL import Image
 from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
+
+from .node import dedup_index_rows
 
 API = "https://deadbydaylight.wiki.gg/api.php"
 
@@ -88,6 +96,27 @@ DEFAULT_INDEX = ROOT / "data" / "icons_index.json"
 # null. fine, since rarity is just a soft cross-check; the disk color is the live read.
 RARITY_WORDS = ["Common", "Uncommon", "Rare", "Very Rare", "Ultra Rare"]
 RARITY_TYPES = {"item": "Items", "addon": "Add-ons", "offering": "Offerings"}
+
+# obtainability: which scraped glyphs can still turn up in a current bloodweb. three states:
+# 'unavailable' (never, or no longer), 'event' (only while its event runs), 'normal' (always).
+# the wiki marks this through categories, not a single flag, so we read two sets:
+#   retired -> gone for good. only offerings have a retired category; there's no Retired Items/
+#   Add-ons (base content gets reworked, not removed), so that's the only one worth pulling.
+#   event   -> event-only skins/rewards (the masquerade med-kit, ghastly gateau, ...).
+# powers are the third case and need no wiki call: they're the only non-bloodweb icon category,
+# so they're flagged 'unavailable' by category when each row is built. retired wins over event.
+RETIRED_CATEGORIES = ["Retired Offerings"]
+EVENT_CATEGORIES = ["Event Items", "Event Add-ons", "Event Offerings"]
+
+# role: which side plays a glyph, for the ui's killer/survivor filter. only perks carry a clean
+# wiki role category (the unique character perks plus the small general pool); items are always
+# survivor and powers always killer, so those are by category. add-ons and offerings have no role
+# category on the wiki (and most offerings suit either side), so they stay null = shown for both
+# roles in the ui. like rarity/obtainability this is a soft ui hint; detection ignores it.
+PERK_ROLE_CATEGORIES = {
+    "survivor": ["Survivor Perks", "Unique Survivor Perks"],
+    "killer":   ["Killer Perks", "Unique Killer Perks"],
+}
 
 # wiki.gg etiquette: identify the scraper with a contact
 USER_AGENT = "dbd-bloodweb-autospender/0.1 (contact: brandonpardi24@gmail.com)"
@@ -220,10 +249,12 @@ def resolve_image_urls(session, filenames):
     return out
 
 
-def _index_one(session, url, key, name, category, rarity, out_dir, index_path, force, delay, skipped):
+def _index_one(session, url, key, name, category, rarity, obtainable, role,
+               out_dir, index_path, force, delay, skipped):
     """download (or reuse the cached) icon and build its index row, or None if it won't decode.
     shared by the prefix-enumerated icons and the explicit EXTRA_EVENT_ICONS so both sides frame
-    the row + phash identically. appends to skipped on an undecodable asset."""
+    the row + phash identically. appends to skipped on an undecodable asset. `desc` is left empty
+    here and filled in one batched pass (fill_descriptions) once every row's name is known."""
     dest = out_dir / category / f"{key}.png"
     if dest.exists() and not force:
         img = Image.open(dest).convert("RGBA")
@@ -238,6 +269,9 @@ def _index_one(session, url, key, name, category, rarity, out_dir, index_path, f
         "name": name,
         "category": category,
         "rarity": rarity,
+        "obtainable": obtainable,            # 'normal' | 'event' | 'unavailable' (see _obtainable)
+        "role": role,                        # 'killer' | 'survivor' | None (see _role)
+        "desc": "",                          # wiki lead sentence, filled by fill_descriptions
         # relative to the index file so the library stays portable; detect resolves it
         # against index_path.parent
         "file": os.path.relpath(dest, index_path.parent).replace("\\", "/"),
@@ -253,6 +287,13 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
     # icon up as we build its row, so one scrape yields a fully-populated index (no second pass).
     # only item/addon/offering have rarity categories, so skip the fetch unless one's selected.
     rmap = fetch_rarity_map(session) if any(c in RARITY_TYPES for c in categories) else {}
+    # obtainability (retired/event sets) in the same up-front pass as rarity, so one scrape yields a
+    # fully-annotated index. cheap (a few category calls); always pulled since any category can hold
+    # event/retired glyphs and powers are flagged by category regardless.
+    obmap = fetch_obtainability(session)
+    # role (killer/survivor) for the ui filter, same up-front-map pattern: only perks need the wiki
+    # lookup, so skip the category calls unless perks are selected (items/powers go by category).
+    rolemap = fetch_perk_roles(session) if "perk" in categories else {}
     index = []
     skipped = []
     for prefix, category in prefixes.items():
@@ -262,7 +303,9 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
             # event prefixes -> 'event' (gold tier, no wiki rarity category); else the wiki
             # rarity, or null for perks/powers and ~visceral top-tier icons
             rarity = "event" if prefix in EVENT_PREFIXES else rmap.get(category, {}).get(_norm(name))
-            row = _index_one(session, entry["url"], key, name, category, rarity,
+            obtainable = _obtainable(category, name, rarity, obmap)
+            role = _role(category, name, rolemap)
+            row = _index_one(session, entry["url"], key, name, category, rarity, obtainable, role,
                              out_dir, index_path, force, delay, skipped)
             if row:
                 index.append(row)
@@ -277,32 +320,22 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
             if url is None:                  # not found on the wiki (renamed/removed), log + skip
                 skipped.append(fname)
                 continue
-            row = _index_one(session, url, key, prettify(key), category, "event",
+            obtainable = _obtainable(category, prettify(key), "event", obmap)
+            role = _role(category, prettify(key), rolemap)
+            row = _index_one(session, url, key, prettify(key), category, "event", obtainable, role,
                              out_dir, index_path, force, delay, skipped)
             if row:
                 index.append(row)
 
+    # fill the wiki lead-sentence tooltips in one batched pass now that every row's name is known
+    fill_descriptions(session, index)
+
     if dedup:
-        index = dedup_index(index)
+        index = dedup_index_rows(index)
     index.sort(key=lambda row: (row["category"], row["key"]))
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
     return index, skipped
-
-
-def dedup_index(rows):
-    """drop rows whose phash exactly duplicates another in the same category, keeping the
-    most informative copy (rarity known beats null). the wiki uploads the same sprite under
-    several filenames (sportFlashlight vs flashlightSport, Telephone vs telephone), which
-    bloats the match pool and can make id_icon's 2nd-best margin meaninglessly tiny. scoped
-    per category so a rare cross-category hash collision isn't merged."""
-    kept = {}
-    for r in rows:
-        key = (r["category"], r["phash"])
-        cur = kept.get(key)
-        if cur is None or (cur.get("rarity") is None and r.get("rarity") is not None):
-            kept[key] = r
-    return list(kept.values())
 
 
 def _norm(name):
@@ -337,6 +370,120 @@ def fetch_rarity_map(session):
     return rmap
 
 
+def fetch_obtainability(session):
+    """build {normalized_name: 'event'|'unavailable'} from the wiki's retired/event categories.
+    retired (gone for good) is applied second so it wins over event (event-only) when a name is in
+    both. powers aren't here; they're flagged 'unavailable' by category as each row is built."""
+    state = {}
+    for cat in EVENT_CATEGORIES:
+        for title in category_members(session, cat):
+            state[_norm(title)] = "event"
+    for cat in RETIRED_CATEGORIES:
+        for title in category_members(session, cat):
+            state[_norm(title)] = "unavailable"
+    return state
+
+
+def _obtainable(category, name, rarity, obmap):
+    """3-state obtainability for one row. powers are never bloodweb nodes; otherwise take the wiki
+    retired/event tag, falling back to the 'event' rarity band (the gold IconsFavors_/banquet tier)
+    so event glyphs the categories miss still read 'event'. default 'normal'."""
+    if category == "power":
+        return "unavailable"
+    return obmap.get(_norm(name)) or ("event" if rarity == "event" else "normal")
+
+
+def fetch_perk_roles(session):
+    """build {normalized_perk_name: 'killer'|'survivor'} from the wiki's perk role categories."""
+    roles = {}
+    for role, cats in PERK_ROLE_CATEGORIES.items():
+        for cat in cats:
+            for title in category_members(session, cat):
+                roles[_norm(title)] = role
+    return roles
+
+
+def _role(category, name, rolemap):
+    """role for one row: items are survivor, powers killer, perks from the wiki role map, and
+    everything else (add-ons, offerings) null so the ui shows it under both role filters."""
+    if category == "item":
+        return "survivor"
+    if category == "power":
+        return "killer"
+    if category == "perk":
+        return rolemap.get(_norm(name))
+    return None
+
+
+def fetch_page_titles(session):
+    """every real (non-redirect) main-namespace article title, paged via list=allpages (500/call).
+    used to resolve our prettified row names to the exact wiki page title for the description lookup:
+    our names drop apostrophes/hyphens ('Amons Necktie') so a direct title query would miss the real
+    page ('Amon's Necktie'); matching by _norm against these real titles fixes that."""
+    out, cont = [], {}
+    while True:
+        params = {
+            "action": "query", "format": "json", "list": "allpages",
+            "apnamespace": "0", "apfilterredir": "nonredirects", "aplimit": "500",
+        }
+        params.update(cont)
+        data = session.get(API, params=params, timeout=30).json()
+        out += [pg["title"] for pg in data.get("query", {}).get("allpages", [])]
+        if "continue" not in data:
+            return out
+        cont = data["continue"]
+
+
+def fetch_descriptions(session, titles):
+    """{normalized_name: lead_sentence} for the given wiki page titles, via the TextExtracts api.
+    the lead is the wiki's one-line classifier (e.g. 'Spring Clamp is an Uncommon Add-on for
+    Toolboxes.'), shown as a hover tooltip in the ui. the real effect text isn't reachable from the
+    api (it's lua-rendered into the page html), so the lead sentence is all we keep. batch in 20s:
+    exlimit caps at 20 for extracts, and a bigger batch silently returns empty for the overflow."""
+    out = {}
+    for i in range(0, len(titles), 20):
+        batch = titles[i:i + 20]
+        data = session.get(API, params={
+            "action": "query", "format": "json", "prop": "extracts",
+            "explaintext": 1, "exintro": 1, "exsentences": 1, "exlimit": "20",
+            "redirects": 1, "titles": "|".join(batch),
+        }, timeout=30).json()
+        for pg in data.get("query", {}).get("pages", {}).values():
+            ex = (pg.get("extract") or "").strip().replace("\n", " ")
+            if ex:
+                out[_norm(pg["title"])] = ex
+    return out
+
+
+def fill_descriptions(session, rows):
+    """populate each row's `desc` in place by matching its name to a real wiki title (via
+    fetch_page_titles) and pulling that page's lead sentence. one batched pass over the whole index
+    after the rows are built; rows with no matching article (powers' internal icon names, a few
+    event items) keep an empty desc."""
+    norm2title = {}
+    for title in fetch_page_titles(session):
+        norm2title.setdefault(_norm(title), title)
+    needed = sorted({norm2title[_norm(r["name"])] for r in rows if _norm(r["name"]) in norm2title})
+    descmap = fetch_descriptions(session, needed)
+    for r in rows:
+        r["desc"] = descmap.get(_norm(r["name"]), "")
+
+
+def annotate_roles(index_path: Path):
+    """add/refresh the `role` field on an existing index in place, no icon downloads.
+    a cheap metadata-only pass (a handful of perk-category calls) so the ui's killer/survivor filter
+    can be enabled without re-running the full scrape, which would also re-fetch every description.
+    re-dedups while it's here so a stale index also sheds the swapped-name duplicate uploads."""
+    rows = json.loads(index_path.read_text(encoding="utf-8"))
+    rolemap = fetch_perk_roles(_session())
+    for r in rows:
+        r["role"] = _role(r.get("category"), r.get("name"), rolemap)
+    rows = dedup_index_rows(rows)
+    rows.sort(key=lambda row: (row["category"], row["key"]))
+    index_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
+    return rows
+
+
 def main():
     ap = argparse.ArgumentParser(description="scrape dbd icons + metadata into a local library")
     ap.add_argument(
@@ -352,7 +499,20 @@ def main():
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--index", type=Path, default=DEFAULT_INDEX)
     ap.add_argument("--no-dedup", action="store_true", help="skip phash dedup during a scrape")
+    ap.add_argument(
+        "--roles-only", action="store_true",
+        help="only add/refresh the role field (+ re-dedup) on the existing index, no downloads"
+    )
     args = ap.parse_args()
+
+    # cheap metadata-only path: enable the ui killer/survivor filter without a full re-scrape.
+    if args.roles_only:
+        index = annotate_roles(args.index)
+        role = Counter(row.get("role") for row in index)
+        print(f"annotated roles on {len(index)} icons -> {args.index}")
+        print(f"role: {role.get('killer', 0)} killer, {role.get('survivor', 0)} survivor, "
+              f"{role.get(None, 0)} unset")
+        return
 
     # one pass: download (or reuse cached) -> normalize+phash -> annotate rarity -> dedup -> write
     index, skipped = scrape(
@@ -366,6 +526,13 @@ def main():
     for cat, n in sorted(counts.items()):
         rar = f"  ({filled[cat]} with rarity)" if filled[cat] else ""
         print(f"  {cat:9} {n}{rar}")
+    obt = Counter(row["obtainable"] for row in index)
+    role = Counter(row.get("role") for row in index)
+    described = sum(1 for row in index if row["desc"])
+    print(f"obtainable: {obt.get('normal', 0)} normal, {obt.get('event', 0)} event, "
+          f"{obt.get('unavailable', 0)} unavailable   |   {described} with a description")
+    print(f"role: {role.get('killer', 0)} killer, {role.get('survivor', 0)} survivor, "
+          f"{role.get(None, 0)} unset")
     if skipped:
         print(f"skipped {len(skipped)} asset(s) that wouldn't decode after retries: {', '.join(skipped)}")
 

@@ -7,15 +7,20 @@ the library cache and a handle to the running spend loop. closing the window sto
 we never leak a clicking background thread.
 """
 
+import tkinter as tk
 import tkinter.messagebox as messagebox
+from pathlib import Path
 
 import customtkinter as ctk
 
-from . import config_io, theme
+from . import config_io, scrape_runner, theme
+from .widgets import tooltip
 from .screens.priorities import PrioritiesScreen
 from .screens.settings import SettingsScreen
 from .screens.run import RunScreen
 from .screens.debug import DebugScreen
+
+ASSETS = Path(__file__).resolve().parent / "assets"
 
 
 class AppState:
@@ -45,12 +50,16 @@ class App(ctk.CTk):
     NAV = [("priorities", "Priorities"), ("settings", "Settings"), ("run", "Run")]
 
     def __init__(self):
+        self._set_app_user_model_id()  # before any window exists, so the taskbar groups us right
         super().__init__()
         ctk.set_appearance_mode("dark")
         self.title("dbd bloodweb auto-spender")
         self.minsize(1000, 640)
+        self._set_window_icon()
 
         self.app_state = AppState()
+        # apply the saved hover-tooltip preference before any card/chip is built (gate is a module flag)
+        tooltip.set_enabled(bool((self.app_state.config or {}).get("show_tooltips", True)))
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
@@ -79,6 +88,35 @@ class App(ctk.CTk):
             )
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(200, self._maybe_first_run_scrape)  # let the window settle before any prompt
+
+    # window chrome
+    def _set_app_user_model_id(self):
+        """give windows an explicit app id so the taskbar shows our icon (not python's) and groups
+        our windows together. windows-only, harmless elsewhere."""
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("dbdbp.autospender")
+        except Exception:
+            pass
+
+    def _set_window_icon(self):
+        """set the title-bar / taskbar icon from the bundled placeholder (replace ui/assets/icon.*).
+        iconbitmap(default=) is the windows title-bar + taskbar path; iconphoto is a cross-platform
+        fallback. both are guarded so a missing/!.ico asset never blocks startup."""
+        ico = ASSETS / "icon.ico"
+        try:
+            if ico.exists():
+                self.iconbitmap(default=str(ico))
+        except Exception:
+            pass
+        png = ASSETS / "icon.png"
+        try:
+            if png.exists():
+                self._icon_img = tk.PhotoImage(file=str(png))  # keep a ref so it isn't gc'd
+                self.iconphoto(True, self._icon_img)
+        except Exception:
+            pass
 
     def _build_nav(self):
         ctk.CTkLabel(self.nav, text="dbdbp", font=theme.FONT_TITLE).pack(
@@ -94,6 +132,11 @@ class App(ctk.CTk):
                                        command=lambda: self.show("debug"))
         self.nav_buttons["debug"] = self.debug_btn
         self.refresh_nav()
+
+        # pinned to the bottom of the rail: fetch/refresh the wiki icon library (the whole app needs
+        # it before it can match or show anything). debug still has the --force variant.
+        self.update_btn = ctk.CTkButton(self.nav, text="⟳ Update icons", command=self._update_icons)
+        self.update_btn.pack(side="bottom", fill="x", padx=theme.PAD, pady=(4, theme.PAD))
 
     def refresh_nav(self):
         """show the Debug nav button only when debugging is enabled in the config."""
@@ -112,6 +155,28 @@ class App(ctk.CTk):
         self.screens["debug"] = DebugScreen(self.content, self)
         for s in self.screens.values():
             s.grid(row=0, column=0, sticky="nsew")  # stacked; show() raises one
+
+    # icon library
+    def _update_icons(self):
+        """fetch/refresh the wiki icon library (non-force), then re-show the priorities library."""
+        scrape_runner.run_scrape(self, force=False, on_done=self._after_scrape)
+
+    def _after_scrape(self):
+        scr = self.screens.get("priorities")
+        if scr is not None:
+            scr.refresh_after_scrape()
+
+    def _maybe_first_run_scrape(self):
+        """on a fresh install the index is absent and the library loads empty; offer to fetch it."""
+        lib = self.app_state.library
+        if lib is not None and getattr(lib, "rows", None):
+            return
+        if messagebox.askyesno(
+            "fetch icon library",
+            "No icon library was found.\n\nThe app needs the Dead by Daylight icons from the wiki "
+            "before it can match or show items. Fetch them now?\n(takes a few minutes)",
+        ):
+            self._update_icons()
 
     def show(self, key):
         """raise a screen and highlight its nav button."""

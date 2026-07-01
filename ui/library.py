@@ -14,7 +14,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from src import detect
-from src.node import normalize_name
+from src.node import dedup_index_rows, normalize_name
 
 from .theme import THUMB_PX
 
@@ -23,22 +23,42 @@ class Library:
     def __init__(self, rows=None, thumb_px=THUMB_PX, cache_size=400):
         if rows is None:
             rows, _ = detect.load_index()
-        self.rows = rows
+        # drop the wiki's swapped-name duplicate uploads (e.g. flashlightSport vs sportFlashlight),
+        # which otherwise show up twice: once as the canonical card and once as a bare icon with no
+        # rarity or tooltip. done at the ui boundary so detection's positional row<->phash arrays are
+        # untouched; a re-scrape persists the same dedup to the index file.
+        self.rows = dedup_index_rows(rows)
         self.thumb_px = thumb_px
         self.cache_size = cache_size
         # sprite "file" is relative to the index file's dir, the same base detect resolves against.
         self._base = Path(detect.DEFAULT_INDEX).parent
         self._cache = OrderedDict()  # row["file"] -> CTkImage, LRU
 
-    def filter(self, query="", category="all", rarity="all"):
+    def filter(self, query="", category="all", rarity="all", role="all", show_unavailable=False):
         """rows matching the search box + dropdowns. case/punctuation-insensitive name search
         (folded like the detector via node.normalize_name), category exact, rarity exact with a
-        'none' bucket for null-rarity rows (perks/powers/visceral)."""
+        'none' bucket for null-rarity rows (perks/powers/visceral).
+
+        role ('all'|'killer'|'survivor') filters by who plays the glyph. only items (survivor),
+        powers (killer), and perks (per the wiki role categories) carry a role; add-ons and
+        offerings have none on the wiki (and most offerings suit either side), so their null role
+        passes both filters rather than being wrongly hidden. rows from an index predating the role
+        scrape are all null and likewise unaffected.
+
+        show_unavailable=False (the default) hides glyphs you can't buy in a current bloodweb:
+        'event' (past-event skins) and 'unavailable' (killer powers, retired offerings). rows from
+        an index predating the obtainability scrape lack the field and count as 'normal'."""
         q = normalize_name(query)
         out = []
         for r in self.rows:
+            if not show_unavailable and r.get("obtainable", "normal") != "normal":
+                continue
             if category != "all" and r.get("category") != category:
                 continue
+            if role != "all":
+                rr = r.get("role")
+                if rr is not None and rr != role:
+                    continue
             if rarity == "none":
                 if r.get("rarity") is not None:
                     continue
@@ -84,4 +104,14 @@ class Library:
 
     def clear_thumbnail_cache(self):
         """drop the in-memory thumbnail cache (used after a re-scrape changes the sprites)."""
+        self._cache.clear()
+
+    def reload(self):
+        """re-read the index from disk and drop cached thumbnails, in place.
+        keeps the same Library object so widgets holding a reference (cards, chips) pick up the new
+        rows without being rebuilt. used after a scrape, including the first-run one that fills an
+        initially empty library."""
+        rows, _ = detect.load_index()
+        self.rows = dedup_index_rows(rows)
+        self._base = Path(detect.DEFAULT_INDEX).parent
         self._cache.clear()

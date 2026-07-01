@@ -4,8 +4,9 @@ customtkinter has no native virtualization (CTkScrollableFrame builds a widget p
 build widgets only for the visible window plus a small buffer and recycle them on scroll. scrolling
 is row-snapped (whole-row steps), which is plenty for fixed-height cards and keeps the math simple.
 
-make_card(master) must return a widget exposing bind_row(row); the list calls that to re-skin a
-pooled widget as it scrolls. set_model(rows) swaps the backing list.
+make_card(master, height) must return a widget exposing bind_row(row); the list calls that to
+re-skin a pooled widget as it scrolls. set_model(rows) swaps the backing list. the height is passed
+to the factory (not configured later) because ctk 6.x only honors a frame's size from its constructor.
 """
 
 import customtkinter as ctk
@@ -49,8 +50,7 @@ class WindowedList(ctk.CTkFrame):
 
     def _ensure_pool(self, n):
         while len(self._pool) < n:
-            card = self.make_card(self.viewport)
-            card.configure(height=self.row_h)  # CTk keeps a configured size; place can't set height
+            card = self.make_card(self.viewport, self.row_h)  # height must come from the constructor
             self._bind_wheel(card)             # so scrolling works while hovering a card
             self._pool.append(card)
 

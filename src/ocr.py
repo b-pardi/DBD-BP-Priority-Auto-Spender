@@ -32,6 +32,13 @@ MIN_BOX_FRAC = 0.02 # the tooltip blob must cover at least this fraction of the 
 NAME_BAND = 0.45 # ocr the top this fraction of the located box, where name and subhead live
 FUZZY_CUTOFF = 0.8 # difflib ratio floor when no exact index hit
 
+# bloodweb auto-crop anchors: fixed ui labels whose ocr'd pixel boxes bound the web, so detection
+# can be cropped to the web and stray ui icons (settings/friends/prestige) never become fake nodes.
+# the boxes are stable per resolution, so find_web_bbox reads them once and the source caches it.
+ANCHOR_TOP_ZONE = (0.08, 0.03, 0.52, 0.24)  # SHARED PERKS (web left+top) + SPEND BLOODPOINTS (right)
+ANCHOR_BL_ZONE = (0.0, 0.82, 0.28, 1.0)     # BACK [ESC] button, sits just below the web bottom
+CROP_PAD_FRAC = 0.02                         # outward pad on left/top/right (bottom pads inward)
+
 _fold_cache = None # {normalized name: row}, built once from the index rows
 _apis = {} # cached PyTessBaseAPI per (psm, whitelist), reused so tesseract inits once
 
@@ -62,6 +69,69 @@ def _api(psm, whitelist=None):
             api.SetVariable("tessedit_char_whitelist", whitelist)
         _apis[key] = api
     return _apis[key]
+
+
+def _ocr_word_boxes(frame, zone, scale=2):
+    """ocr a fractional zone (fx0,fy0,fx1,fy1) of the frame, returning [(UPPER_TEXT, (x0,y0,x1,y1))]
+    with the word boxes in FULL-FRAME pixel coords. sparse-text psm to catch scattered ui labels,
+    word-level boxes via the result iterator. backs find_web_bbox's anchor search."""
+    h, w = frame.shape[:2]
+    zx0, zy0, zx1, zy1 = int(zone[0] * w), int(zone[1] * h), int(zone[2] * w), int(zone[3] * h)
+    g = cv2.cvtColor(frame[zy0:zy1, zx0:zx1], cv2.COLOR_BGR2GRAY)
+    g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)  # tesseract likes big glyphs
+    t = get_tesserocr()
+    api = _api(t.PSM.SPARSE_TEXT)
+    api.SetImage(Image.fromarray(g))
+    api.Recognize()
+    out = []
+    for word in t.iterate_level(api.GetIterator(), t.RIL.WORD):
+        txt = (word.GetUTF8Text(t.RIL.WORD) or "").strip()
+        if not txt:
+            continue
+        bx0, by0, bx1, by1 = word.BoundingBox(t.RIL.WORD)            # zone-local, at `scale`
+        out.append((txt.upper(), (zx0 + bx0 // scale, zy0 + by0 // scale,
+                                  zx0 + bx1 // scale, zy0 + by1 // scale)))
+    return out
+
+
+def find_web_bbox(frame, pad_frac=CROP_PAD_FRAC):
+    """auto-locate the bloodweb's bounding box by ocr-ing fixed ui anchor labels, so detection can be
+    cropped to the web (keeping stray ui icons like settings/friends/prestige out of the node
+    detector). anchors, stable per resolution: 'SHARED PERKS' marks the web's left edge + top,
+    'SPEND BLOODPOINTS' the right edge, 'BACK [ESC]' the bottom. returns (x0, y0, x1, y1) in
+    full-frame pixels, or None when too few anchors are found (caller then uses the full frame).
+    left/top/right pad OUTWARD; the bottom pads INWARD, because the settings/friends icon row sits
+    just below the BACK button and an outward pad would re-include exactly those stray icons.
+    frame is the full bgr grab (h, w, 3)."""
+    if frame is None:
+        return None
+    h, w = frame.shape[:2]
+    top = _ocr_word_boxes(frame, ANCHOR_TOP_ZONE)
+    bl = _ocr_word_boxes(frame, ANCHOR_BL_ZONE)
+
+    def box_of(words, *needles):
+        return next((b for txt, b in words if any(n in txt for n in needles)), None)
+
+    shared = box_of(top, "SHARED")               # web left edge + a top reference
+    back = box_of(bl, "BACK", "ESC")             # sits just below the web bottom
+    # 'SPEND BLOODPOINTS' is two words; the web's right edge is BLOODPOINTS' (rightmost) edge, so
+    # take the max right edge over both rather than the first match (SPEND alone stops short).
+    right_boxes = [b for txt, b in top if "BLOODPOINTS" in txt or "SPEND" in txt]
+
+    left = shared[0] if shared else None
+    right = max((b[2] for b in right_boxes), default=None)
+    bottom = back[1] if back else None
+    tops = [b[1] for b in right_boxes] + ([shared[1]] if shared else [])
+    top_y = min(tops, default=None)
+    if None in (left, right, bottom, top_y):
+        return None                              # not enough anchors, fall back to the full frame
+
+    pad = int(pad_frac * h)
+    x0, y0 = max(left - pad, 0), max(top_y - pad, 0)
+    x1, y1 = min(right + pad, w), min(bottom - pad, h)  # bottom pads inward, clearing the icon row
+    if x1 - x0 < 0.2 * w or y1 - y0 < 0.2 * h:
+        return None                              # implausibly small, treat as a failed read
+    return (x0, y0, x1, y1)
 
 
 def read_bp(frame):
@@ -157,7 +227,7 @@ def _match_name(lines, rows):
     return best
 
 
-def find_node_tooltip(node, frame, region, rows):
+def find_node_tooltip(node, frame, region, rows, hover_delay_s=None):
     """identify a node by hovering it and reading dbd's name tooltip, mutating node in place.
     detect routes here the nodes it could not trust (node.needs_resolution) rather than guessing.
     the tooltip is anchored to the node and flips side to stay on screen, so we park the cursor,
@@ -165,8 +235,11 @@ def find_node_tooltip(node, frame, region, rows):
     on a read it sets node.name, node.match and node.resolved_by 'ocr', else leaves node as is.
     live only, the caller skips this when frame is None (the sim path).
     frame is the detection grab (h, w, 3) and region maps frame coords to screen.
+    hover_delay_s overrides HOVER_DELAY_S (the tooltip fade-in wait); raise it if reads fail because
+    the tooltip hadn't appeared yet. None uses the default.
     """
     from . import capture, input_control # live deps imported lazily so ocr stays importable for tests
+    hover_delay_s = HOVER_DELAY_S if hover_delay_s is None else hover_delay_s
     h, w = frame.shape[:2]
 
     # park off any node so the before frame holds no stale tooltip from a previous hover.
@@ -177,7 +250,7 @@ def find_node_tooltip(node, frame, region, rows):
     # hover the node and let its tooltip fade in, then grab the after frame.
     sx, sy = capture.frame_to_screen(node.x, node.y, region)
     input_control.move_to(sx, sy)
-    time.sleep(HOVER_DELAY_S)
+    time.sleep(hover_delay_s)
     after, _ = capture.grab_with_region(region)
 
     box = _locate_tooltip(before, after)

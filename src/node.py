@@ -31,8 +31,12 @@ SHAPE_CATEGORIES = {
 # ncc is cosine (higher=better), phash is hamming distance (lower=better).
 # placeholders from the matcher eval (ncc real conf ~0.5-0.84), tune against the fixtures.
 NCC_CONF_MIN = 0.45
-NCC_MARGIN_MIN = 0.03
 PHASH_MAX_HAM = 10
+# runner-up MARGIN floors: retained for the followup but no longer gate `confident` (2026-06-29).
+# against big same-shape pools of near-duplicate icons a correct top match very often has a tiny
+# margin, so gating on it routed most good matches to ocr for nothing. score alone gates now; the
+# margin stays logged (see runner_up) as the lever for the later matching-quality work.
+NCC_MARGIN_MIN = 0.03
 PHASH_MARGIN_MIN = 2
 
 
@@ -44,6 +48,69 @@ def normalize_name(s):
     if not s:
         return ''
     return re.sub(r'[^a-z0-9]', '', s.lower())
+
+
+def _phash_hamming(a, b):
+    """hamming distance (0..64) between two 16-hex-char phash strings, via int popcount.
+    kept stdlib-only so the ui can dedup the index without pulling in imagehash."""
+    return bin(int(a, 16) ^ int(b, 16)).count('1')
+
+
+def _name_wordset(name):
+    """the set of lowercase alphanumeric word tokens in a name.
+    used to spot swapped-word filename aliases of the same sprite, where the wiki uploads one
+    glyph under both orders ('Sport Flashlight' vs 'Flashlight Sport') so the two share a word
+    set but differ in order."""
+    return frozenset(re.findall(r'[a-z0-9]+', (name or '').lower()))
+
+
+def _row_informativeness(row):
+    """rank an index row by how much metadata it carries, so dedup keeps the richest copy.
+    the alias uploads come in with rarity null and an empty desc, because their swapped name
+    misses the wiki rarity-category and page-title lookups, so the canonical row outranks them."""
+    return (row.get('rarity') is not None, bool(row.get('desc')))
+
+
+def dedup_index_rows(rows, near_ham=10):
+    """drop duplicate index rows, keeping the most informative copy of each glyph.
+
+    two passes, both scoped per category so a chance cross-category hash collision isn't merged:
+      1. exact phash duplicates (the wiki serves a byte-identical sprite under several filenames).
+      2. near-duplicate swapped-word aliases: same category, same name word-set, and phashes within
+         near_ham bits. the wiki uploads one sprite under both word orders (sportFlashlight vs
+         flashlightSport), which the exact pass misses because the two uploads aren't byte-identical
+         (hamming ~2-6, not 0). near_ham=10 sits above that real-dup spread and well below distinct
+         same-word-set sprites (e.g. K35_Teleport vs Teleport_K35 at ~28), so only true aliases merge.
+
+    keeps the richest row per group (rarity known, then a description present), which is exactly the
+    canonical name; the bare alias (null rarity, empty desc) is the one dropped. order preserved."""
+    drop = set()
+    # pass 1: exact phash, any name
+    by_hash = {}
+    for r in rows:
+        key = (r.get('category'), r.get('phash'))
+        keep = by_hash.get(key)
+        if keep is None:
+            by_hash[key] = r
+        else:
+            lose = r if _row_informativeness(r) <= _row_informativeness(keep) else keep
+            by_hash[key] = keep if lose is r else r
+            drop.add(id(lose))
+    # pass 2: near phash, only within same category + same word-set (a near-zero-risk signal)
+    by_wordset = {}
+    for r in rows:
+        if id(r) in drop:
+            continue
+        by_wordset.setdefault((r.get('category'), _name_wordset(r.get('name'))), []).append(r)
+    for (cat, ws), group in by_wordset.items():
+        if len(group) < 2 or not ws:
+            continue
+        group.sort(key=_row_informativeness, reverse=True)
+        anchor = group[0]
+        for other in group[1:]:
+            if _phash_hamming(anchor['phash'], other['phash']) <= near_ham:
+                drop.add(id(other))
+    return [r for r in rows if id(r) not in drop]
 
 
 @dataclass
@@ -65,6 +132,7 @@ class Node:
     score: float = 0.0
     margin: float = 0.0
     matcher: str = 'ncc'
+    runner_up: str = None   # 2nd-best match name; debug-only diagnostic for near-tie margins
 
     # provenance of the final identity, the loop sets this to 'ocr' after a hover scan.
     resolved_by: str = 'match'   # 'match' | 'ocr'
@@ -88,6 +156,7 @@ class Node:
             score=float(d.get('score', 0.0)),
             margin=float(d.get('margin', 0.0)),
             matcher=d.get('matcher', 'ncc'),
+            runner_up=d.get('runner_up'),
             glyph_bgr=d.get('glyph_bgr'),
         )
 
@@ -110,12 +179,14 @@ class Node:
     @property
     def confident(self):
         """is the icon match strong enough to trust on its own?
-        direction depends on the matcher (ncc higher=better, phash lower=better)."""
+        direction depends on the matcher (ncc higher=better, phash lower=better).
+        score-only gate: the runner-up margin was dropped here (see NCC_MARGIN_MIN note) because it
+        sent most correct-but-near-tie matches to ocr; margin stays logged as a followup signal."""
         if self.match is None:
             return False
         if self.matcher == 'phash':
-            return self.score <= PHASH_MAX_HAM and self.margin >= PHASH_MARGIN_MIN
-        return self.score >= NCC_CONF_MIN and self.margin >= NCC_MARGIN_MIN  # ncc / ncc_masked
+            return self.score <= PHASH_MAX_HAM
+        return self.score >= NCC_CONF_MIN  # ncc / ncc_masked
 
     @property
     def category_agrees(self):
@@ -135,11 +206,35 @@ class Node:
         return self.matched_rarity == self.rarity
 
     @property
+    def resolution_reasons(self):
+        """the specific reasons this node would route to ocr, an empty list if it's trusted.
+        mirrors needs_resolution but spells out which check failed and with what values, so a
+        debug log can say WHY ocr fired (weak score, tiny margin, attr disagreement) instead of
+        just that it did. grouped: a weak match is one reason carrying its failing sub-conditions,
+        then category/rarity disagreement (only meaningful when there is a match to disagree with).
+        """
+        reasons = []
+        if not self.confident:
+            if self.match is None:
+                reasons.append("no icon match")
+            elif self.matcher == 'phash':
+                reasons.append(f"weak match (dist {self.score:.0f}>{PHASH_MAX_HAM})")
+            else:  # ncc / ncc_masked, higher cosine = better
+                reasons.append(f"weak match (score {self.score:.2f}<{NCC_CONF_MIN})")
+        if self.match is not None:  # disagreement only means something against an actual match
+            if not self.category_agrees:
+                reasons.append(f"category {self.matched_category!r} not valid for {self.socket_shape}")
+            if not self.rarity_agrees:
+                reasons.append(f"rarity disagree (icon {self.matched_rarity!r} vs disk {self.rarity!r})")
+        return reasons
+
+    @property
     def needs_resolution(self):
         """should the loop fall back to an ocr hover scan to settle identity?
-        trigger when the icon match is weak OR the observed and matched attrs disagree.
-        this is the replacement for a confidence gate: both routes go to ocr, not a guess."""
-        return (not self.confident) or (not self.category_agrees) or (not self.rarity_agrees)
+        true when the icon match is weak OR the observed and matched attrs disagree; see
+        resolution_reasons for the itemized why. this is the replacement for a plain confidence
+        gate: both routes go to ocr, not a guess."""
+        return bool(self.resolution_reasons)
 
     @property
     def effective_category(self):

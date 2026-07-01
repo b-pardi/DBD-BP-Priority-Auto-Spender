@@ -10,7 +10,7 @@ the screen reads state() to label its buttons; the app stops this on window clos
 import sys
 import threading
 
-from src import detect, spender
+from src import detect, ocr, spender
 
 
 class _QueueWriter:
@@ -50,8 +50,12 @@ class RunController:
         ncc = detect.load_ncc_templates(self.rows) if matcher.startswith("ncc") else None
         return spender.live_source(
             self.rows, ncc, matcher=matcher,
-            debug=config.get("debug", False),
             thresh_method=config.get("thresh_method", "adaptive_gaussian"),
+            use_hough=config.get("node_finder", "contours") == "hough",
+            auto_crop=config.get("auto_crop", True),
+            web_bbox=config.get("web_bbox"),
+            crop_pad_frac=config.get("crop_pad_frac", ocr.CROP_PAD_FRAC),
+            debug=config.get("debug", False),
         )
 
     def start(self, config, sim, dry_run):
@@ -72,7 +76,8 @@ class RunController:
         old = sys.stdout
         sys.stdout = _QueueWriter(self.log_queue)  # tee the loop's prints into the ui log
         try:
-            spender.run(source, config, self.switch, self.rows, click=click)
+            spender.run(source, config, self.switch, self.rows, click=click,
+                        debug=config.get("debug", False))
         except Exception as e:
             self.log_queue.put(f"run error: {type(e).__name__}: {e}")
         finally:

@@ -1,8 +1,19 @@
 {
   "_note": "ordered priority list, highest first. each rule is a specific item (name, optional rarity) or a category. categories: item, addon, offering, perk, power. rarities: common, uncommon, rare, very rare, ultra rare.",
-  "dry_run": true,
+  "dry_run": false,
   "stop_bp_threshold": 0,
   "priorities": [
+    [
+      {
+        "type": "category",
+        "category": "perk"
+      },
+      {
+        "type": "item",
+        "name": "10th Anniversary",
+        "rarity": "event"
+      }
+    ],
     [
       {
         "type": "item",
@@ -30,6 +41,11 @@
         "type": "item",
         "name": "flashlight",
         "rarity": "uncommon"
+      },
+      {
+        "type": "item",
+        "name": "banquet Flashlight",
+        "rarity": "event"
       }
     ],
     [
@@ -102,5 +118,135 @@
       }
     ]
   ],
-  "debug": true
+  "debug": true,
+  "profiles": {
+    "Flashy-Focused": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        },
+        {
+          "type": "item",
+          "name": "10th Anniversary",
+          "rarity": "event"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "focus Lens",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "high-End Sapphire Lens",
+          "rarity": "very rare"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "Flashlight",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "sport Flashlight",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "flashlight",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "banquet Flashlight",
+          "rarity": "event"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "long Life Battery",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "heavy Duty Battery",
+          "rarity": "uncommon"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "ranger Med Kit",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "emergency Med Kit",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "banquet Med Kit",
+          "rarity": "event"
+        },
+        {
+          "type": "item",
+          "name": "first Aid Kit",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "alexs Toolbox",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "banquet Toolbox",
+          "rarity": "event"
+        },
+        {
+          "type": "item",
+          "name": "commodious Toolbox",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "engineers Toolbox",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "mechanics Toolbox",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "cutting Wire",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "grip Wrench",
+          "rarity": "rare"
+        }
+      ]
+    ],
+    "test": []
+  },
+  "active_profile": "Flashy-Focused",
+  "show_tooltips": true,
+  "hide_unavailable": false,
+  "start_key": "f7",
+  "kill_key": "f8",
+  "matcher": "ncc",
+  "thresh_method": "adaptive_gaussian",
+  "settle_s": 1.5,
+  "node_finder": "hough",
+  "ocr_hover_s": 0.5,
+  "advance_s": 8.0
 }

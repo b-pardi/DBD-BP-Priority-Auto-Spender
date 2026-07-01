@@ -2,8 +2,9 @@
 
 owns the in-memory tier model (a list of tiers, each a list of rule dicts) and renders it top
 (highest) to bottom. one tier is the selected add-target so library clicks and the rule builder land
-there. tiers can be removed and reordered (up/down); within a tier there is no order, since the
-engine picks randomly among matches, so the ui says so once and never implies an ordering.
+there. tiers can be removed and reordered (up/down, and jump to top/bottom); individual rules can be
+nudged into the adjacent tier from their chip. within a tier there is no order, since the engine
+picks randomly among matches, so the ui says so once and never implies an ordering.
 
 small enough that a plain CTkScrollableFrame rebuilt on each edit is fine (only the library needs
 virtualization). edits go through this widget's methods; it deep-copies on set_tiers so nothing is
@@ -36,6 +37,10 @@ class TierList(ctk.CTkScrollableFrame):
         """tiers with empties dropped, ready to persist."""
         return [list(t) for t in self.tiers if t]
 
+    def get_tiers(self):
+        """a deep copy of the current tiers including empty ones (used to stash a profile on switch)."""
+        return [list(t) for t in self.tiers]
+
     def add_tier(self):
         self.tiers.append([])
         self.selected = len(self.tiers) - 1
@@ -59,9 +64,45 @@ class TierList(ctk.CTkScrollableFrame):
                 self.selected = i
             self._changed()
 
+    def move_tier_to(self, i, j):
+        """pull tier i out and reinsert at index j (used by the to-top / to-bottom buttons)."""
+        if not (0 <= i < len(self.tiers)) or i == j:
+            return
+        j = max(0, min(j, len(self.tiers) - 1))
+        tier = self.tiers.pop(i)
+        self.tiers.insert(j, tier)
+        if self.selected == i:
+            self.selected = j
+        elif i < self.selected <= j:
+            self.selected -= 1
+        elif j <= self.selected < i:
+            self.selected += 1
+        self._changed()
+
+    def add_template_tier(self, rules):
+        """append a new tier pre-filled with template rules (e.g. 'any perk') and select it."""
+        self.tiers.append([dict(r) for r in rules])
+        self.selected = len(self.tiers) - 1
+        self._changed()
+
+    def _move_rule(self, ti, rule, delta):
+        """move one rule into the adjacent tier (delta -1 up / +1 down), de-duped; no-op at the ends."""
+        j = ti + delta
+        if not (0 <= ti < len(self.tiers)) or not (0 <= j < len(self.tiers)):
+            return
+        if rule in self.tiers[ti]:
+            self.tiers[ti].remove(rule)
+        if rule not in self.tiers[j]:
+            self.tiers[j].append(dict(rule))
+        self._changed()
+
     def select(self, i):
         """set the add-target tier (not a config edit, so no on_change)."""
         self.selected = i
+        self._render()
+
+    def refresh(self):
+        """re-render in place (e.g. after a scrape fills in previously-missing chip thumbnails)."""
         self._render()
 
     def add_rule(self, rule):
@@ -119,12 +160,17 @@ class TierList(ctk.CTkScrollableFrame):
             fg_color=(NAV_ACTIVE_COLOR if sel else "transparent"),
             command=lambda i=ti: self.select(i),
         ).pack(side="left", fill="x", expand=True)
-        ctk.CTkButton(header, text="▲", width=28,
+        last = len(self.tiers) - 1
+        ctk.CTkButton(header, text="⤒", width=24,
+                      command=lambda i=ti: self.move_tier_to(i, 0)).pack(side="left", padx=2)
+        ctk.CTkButton(header, text="▲", width=24,
                       command=lambda i=ti: self.move_tier(i, -1)).pack(side="left", padx=2)
-        ctk.CTkButton(header, text="▼", width=28,
+        ctk.CTkButton(header, text="▼", width=24,
                       command=lambda i=ti: self.move_tier(i, 1)).pack(side="left", padx=2)
-        ctk.CTkButton(header, text="x", width=28,
-                      command=lambda i=ti: self.remove_tier(i)).pack(side="left", padx=2)
+        ctk.CTkButton(header, text="⤓", width=24,
+                      command=lambda i=ti: self.move_tier_to(i, last)).pack(side="left", padx=2)
+        ctk.CTkButton(header, text="x", width=24,
+                      command=lambda i=ti: self.remove_tier(i)).pack(side="left", padx=(2, 0))
 
         if not tier:
             ctk.CTkLabel(box, text="(empty — click a library item or add a category rule)",
@@ -134,4 +180,5 @@ class TierList(ctk.CTkScrollableFrame):
                 box, rule, self.library,
                 on_remove=lambda r, t=tier: self._remove_from(t, r),
                 on_toggle_rarity=self._toggle_rarity,
+                on_move=lambda r, d, i=ti: self._move_rule(i, r, d),
             ).pack(fill="x", padx=PAD, pady=2)

@@ -22,7 +22,8 @@ present it clicks the center auto-spend to finish the level and move on.
     - [x] OCR fall back method to detect difficult nodes
 - [x] priority: rank detected nodes, pick the next buy or the auto-spend fallback
 - [x] spender: live capture/click loop, ocr stop-threshold, kill switch
-- [ ] ui: user interface for defining priorities and general program settings
+- [x] ui: user interface for defining priorities and general program settings
+    - [x] add debugging view in ui
 
 ---
 
@@ -33,8 +34,16 @@ present it clicks the center auto-spend to finish the level and move on.
     - [ ] train model
     - [ ] integrate model
 - [ ] node detection/extraction v2
-- [ ] auto determine bbox for bloodweb frame crop.
+- [ ] bloodweb prestige screen detection
+- [x] auto determine bbox for bloodweb frame crop.
+- [x] fix non-breaking UI bugs
+- [ ] add within tier priority selection
 - [ ] (if needed) HSV calibration/fine tuning option for color masking
+
+#### Beta (some smart nice to have features)
+- [ ] Entity aware node selection
+- [ ] bloodweb prestige/level spending cap
+- [ ] auto pause when detecting bloodweb no longer visible
 
 ## Setup
 

@@ -17,6 +17,10 @@ RARITY_COLORS = {
 }
 NULL_RARITY_COLOR = "#6b6b6b"  # perks/powers/visceral, no rarity disk
 
+# muted text for library cards/chips flagged not-currently-obtainable (event/retired/powers); they
+# only show at all when the "show event/unavailable" filter reveals them, so dim reads as "can't buy".
+MUTED_TEXT_COLOR = ("gray45", "gray55")
+
 
 def rarity_color(rarity):
     """accent color for a rarity string, neutral grey for null/unknown."""
@@ -28,7 +32,14 @@ NAV_ACTIVE_COLOR = "#1f6aa5"
 
 # spacing / sizing
 PAD = 8
-THUMB_PX = 56  # library card thumbnail size
+THUMB_PX = 34   # library card / chip thumbnail size (small, so rows stay compact)
+ROW_H = 44      # library card height; the windowed list pitches rows by this
+CHIP_H = 40     # placed-rule chip height in a tier
+ACCENT_W = 4    # width of the rarity accent bar on cards/chips
+
+# note for ctk 6.x: a CTkFrame's size must be set in the constructor (width=/height=), not via a
+# later .configure(); and to actually hold that size against packed children you must turn off
+# geometry propagation (pack_propagate(False)). cards/chips rely on this to stay row-height.
 
 # fonts as (family, size[, style]) tuples consumed by widget font=
 FONT_TITLE = ("Segoe UI", 16, "bold")

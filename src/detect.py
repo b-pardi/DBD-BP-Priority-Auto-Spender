@@ -198,15 +198,16 @@ def id_icon_hamming(icon_bgr, rows, ref_hashes, pool=None):
     """nearest neighbor of an unknown icon via hamming distance between its phash and the library phashes.
     pool is an optional bool mask (n,) to restrict the search to a category,
     once we read the node's socket shape, giving a smaller cleaner candidate set.
-    returns (row, dist, margin): best row, its hamming distance (0..64, lower is better),
-    and the gap to the 2nd best (a small gap means an ambiguous match)."""
+    returns (row, dist, margin, runner_up_row): best row, its hamming distance (0..64, lower is
+    better), the gap to the 2nd best (a small gap means an ambiguous match), and that 2nd-best row
+    (a debug diagnostic for near-tie margins)."""
     gray = cv2.cvtColor(icon_bgr, cv2.COLOR_BGR2GRAY) # same luma weights as PIL 'L'
     q = imagehash.phash(Image.fromarray(gray)).hash.flatten() # (64,) bool
     dists = np.count_nonzero(ref_hashes != q, axis=1) # (n,) hamming: differing bits
     if pool is not None:
         dists = np.where(pool, dists, 65) # 65 > max dist of 64
     order = np.argsort(dists)
-    return rows[order[0]], int(dists[order[0]]), int(dists[order[1]] - dists[order[0]])
+    return rows[order[0]], int(dists[order[0]]), int(dists[order[1]] - dists[order[0]]), rows[order[1]]
 
 
 def _sprite_glyph_gray(path, out_size=GLYPH_SIZE):
@@ -256,8 +257,9 @@ def id_icon_ncc_masked(icon_bgr, rows, templates, pool=None, res=NCC_RES, fg_fra
     build a foreground mask from the query glyph (its bright strokes)
     and score each template by cosine over just those pixels
     templates = (T, T2) from load_ncc_templates.
-    returns (row, score, margin)
-    score = masked cosine in [-1, 1] (higher better, unlike phash), margin = best - 2nd best."""
+    returns (row, score, margin, runner_up_row)
+    score = masked cosine in [-1, 1] (higher better, unlike phash), margin = best - 2nd best,
+    runner_up_row = the 2nd-best row (a debug diagnostic for near-tie margins)."""
     T, T2 = templates
     q = _glyph_to_vec(cv2.cvtColor(icon_bgr, cv2.COLOR_BGR2GRAY), res)
     m = (q > max(fg_floor, q.max() * fg_frac)).astype(np.float32)   # query foreground strokes
@@ -270,7 +272,8 @@ def id_icon_ncc_masked(icon_bgr, rows, templates, pool=None, res=NCC_RES, fg_fra
     if pool is not None:
         scores = np.where(pool, scores, -2.0)                      # below the min possible cosine
     order = np.argsort(-scores)                                    # higher cosine = better
-    return rows[order[0]], float(scores[order[0]]), float(scores[order[0]] - scores[order[1]])
+    return (rows[order[0]], float(scores[order[0]]),
+            float(scores[order[0]] - scores[order[1]]), rows[order[1]])
 
 
 def ncc_plain_templates(templates):
@@ -288,8 +291,9 @@ def id_icon_ncc(icon_bgr, rows, Tz, pool=None, res=NCC_RES):
     z-normed cosine between the whole query glyph and each z-normed template (Tz from ncc_plain_templates).
     unlike id_icon_ncc_masked this keeps the full glyph-on-black silhouette,
     instead of masking to bright strokes
-    returns (row, score, margin)
-    score = cosine in [-1, 1] (HIGHER is better), margin = gap to the 2nd best."""
+    returns (row, score, margin, runner_up_row)
+    score = cosine in [-1, 1] (HIGHER is better), margin = gap to the 2nd best,
+    runner_up_row = the 2nd-best row (a debug diagnostic for near-tie margins)."""
     q = _glyph_to_vec(cv2.cvtColor(icon_bgr, cv2.COLOR_BGR2GRAY), res)
     q = q - q.mean()
     q /= (np.linalg.norm(q) + 1e-6)
@@ -297,7 +301,8 @@ def id_icon_ncc(icon_bgr, rows, Tz, pool=None, res=NCC_RES):
     if pool is not None:
         scores = np.where(pool, scores, -2.0)                      # below the min possible cosine
     order = np.argsort(-scores)                                    # higher cosine = better
-    return rows[order[0]], float(scores[order[0]]), float(scores[order[0]] - scores[order[1]])
+    return (rows[order[0]], float(scores[order[0]]),
+            float(scores[order[0]] - scores[order[1]]), rows[order[1]])
 
 
 def _crop_glyph_from_frame(frame, x, y, r, r_tol=1):
@@ -447,12 +452,14 @@ def sample_disk_hsv(hsv, x, y, r, s_floor=30, v_floor=20, min_px=6):
     return np.array([h_med, np.median(px[:, 1]), np.median(px[:, 2])])
 
 
-def find_nodes_in_frame(frame, debug=False, max_anchor_dist=None, thresh_method='adaptive_gaussian'):
+def find_nodes_in_frame(frame, debug=False, max_anchor_dist=None, thresh_method='adaptive_gaussian',
+                        use_hough=False):
     """find all circles in the blood web and clean them up to identify clickable nodes.
-    thresh_method picks the binarization find_circles uses (adaptive_gaussian|otsu|canny), threaded
-    from detect() so the settings ui can tune it."""
+    thresh_method picks the binarization find_circles uses (adaptive_gaussian|otsu|canny) and
+    use_hough swaps the localizer between the contour pass (default) and HoughCircles, both threaded
+    from detect() so the settings ui can tune them."""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) # (H,W,3), for the per-circle color read
-    circles = find_circles(frame, thresh_method=thresh_method, debug=False) # list of (x, y, r)
+    circles = find_circles(frame, thresh_method=thresh_method, use_hough=use_hough, debug=False) # list of (x, y, r)
 
     nodes = []
     for x, y, r in circles:
@@ -626,12 +633,13 @@ def classify_socket(node_contours, poly_tol=0.05):
 
 
 def detect(frame, rows=None, hashes=None, ncc_templates=None, matcher="ncc", r_tol=1.5,
-           debug=False, thresh_method="adaptive_gaussian"):
+           debug=False, thresh_method="adaptive_gaussian", use_hough=False):
     """full pipeline; returns per-node dicts {x, y, r, rar, cat, glyph_bgr, match, score, margin,
     matcher}. matcher picks identification: 'ncc' (default, plain z-normed cosine, higher=better),
     'ncc_masked' (cosine over the query's bright strokes, higher=better), or 'phash' (hamming,
     lower=better). score's direction follows the matcher (see _score_str). thresh_method picks the
-    node-localization binarization (adaptive_gaussian|otsu|canny), passed down to find_circles."""
+    node-localization binarization (adaptive_gaussian|otsu|canny) and use_hough swaps the localizer
+    (contour pass vs HoughCircles), both passed down to find_circles."""
     if rows is None:
         rows, hashes = load_index()
     if matcher == "phash" and hashes is None:
@@ -641,7 +649,8 @@ def detect(frame, rows=None, hashes=None, ncc_templates=None, matcher="ncc", r_t
     ncc_plain_T = ncc_plain_templates(ncc_templates) if matcher == "ncc" else None
 
     cats = np.array([r['category'] for r in rows]) # (n,) strings of 'item', 'perk', ...
-    nodes = find_nodes_in_frame(frame, debug=debug, thresh_method=thresh_method) # [(x, y, r, rarity), ...]
+    nodes = find_nodes_in_frame(frame, debug=debug, thresh_method=thresh_method,
+                                use_hough=use_hough) # [(x, y, r, rarity), ...]
 
     res = []
     # the center auto-spend node is found by its own glow color, not the disk pipeline, and gets
@@ -675,22 +684,23 @@ def detect(frame, rows=None, hashes=None, ncc_templates=None, matcher="ncc", r_t
         # identify the glyph against the library, restricted to the socket-shape category pool
         pool = None if socket_shape is None else np.isin(cats, NODE_SHAPE_DICT[socket_shape])
         if matcher == "ncc":
-            best_match_row, score, margin = id_icon_ncc(glyph, rows, ncc_plain_T, pool=pool)
+            best_match_row, score, margin, runner = id_icon_ncc(glyph, rows, ncc_plain_T, pool=pool)
         elif matcher == "ncc_masked":
-            best_match_row, score, margin = id_icon_ncc_masked(glyph, rows, ncc_templates, pool=pool)
+            best_match_row, score, margin, runner = id_icon_ncc_masked(glyph, rows, ncc_templates, pool=pool)
         else:
-            best_match_row, score, margin = id_icon_hamming(glyph, rows, hashes, pool=pool)
-        if debug: print(matcher, best_match_row['key'], round(score, 3), round(margin, 3))
+            best_match_row, score, margin, runner = id_icon_hamming(glyph, rows, hashes, pool=pool)
+        if debug:
+            print(matcher, best_match_row['key'], round(score, 3), round(margin, 3),
+                  "vs", runner['key'])
 
-        # TODO: resolve descrepancies in observed attrs vs matched icon attrs (from wiki)
-        # TODO Moved to spender logic
-
+        # observed attrs vs matched icon attrs are reconciled in spender (see node.needs_resolution)
         res.append({
             'x': cx, 'y': cy, 'r': r_ref,
             'rar': rarity,
             'cat': socket_shape,
             'glyph_bgr': glyph,
             'match': best_match_row, 'score': score, 'margin': margin, 'matcher': matcher,
+            'runner_up': runner.get('name') or runner.get('key'),  # 2nd-best, debug-only
         })
     return res
 

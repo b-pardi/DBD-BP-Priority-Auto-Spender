@@ -16,6 +16,7 @@ from PIL import Image
 import matplotlib.pyplot as plt
 
 from . import paths
+from .resolution import Resolution
 
 ROOT = Path(__file__).resolve().parent.parent
 USR_HSV = ROOT / "usr" / "rarity-HSVs.json"         # active anchors, evolve per user each web
@@ -355,18 +356,26 @@ def find_circles(
         frame, blur_ksize=11, open_ksize=11, close_ksize=5,
         thresh_method='adaptive_gaussian', use_hough=False,
         canny_lo=0, canny_hi=255, dp=1.5, circularity_thresh=0.78, r0_floor=0.6,
-        rmin=30, rmax=100, min_dist_frac=4, accumulator_thresh=20,
-        debug=False
+        rmin=None, rmax=None, min_dist_frac=4, accumulator_thresh=20,
+        resolution=None, debug=False
     ):
     """detect bloodweb nodes in a given input frame.
 
     Preprocessing: choice between 3 different threshold methods (adaptive_gaussian, otsu, canny) to preprocess for contour detection
     morphological closing -> flood fill -> morphological open to close gaps and denoise
-    
+
     Detection: Either Hough circles (if use_hough=True) or coarse then refine fine pass over the preprocessed contours
         - rough pass to grab the radii of all countour within (rmin,rmax)
         - peak finding to identify node centers
-    """    
+
+    rmin/rmax default to None, which resolves to resolution.rmin/rmax (resolution itself defaults
+    to Resolution.from_frame(frame), so an explicit rmin/rmax still overrides the resolution-derived
+    value when given, same as before this became resolution-aware).
+    """
+    resolution = resolution or Resolution.from_frame(frame)
+    rmin = resolution.rmin if rmin is None else rmin
+    rmax = resolution.rmax if rmax is None else rmax
+
     bin_frame = _binarize(frame, thresh_method=thresh_method, blur_ksize=blur_ksize, canny_lo=canny_lo, canny_hi=canny_hi)
 
     open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_ksize, open_ksize))   
@@ -452,14 +461,20 @@ def sample_disk_hsv(hsv, x, y, r, s_floor=30, v_floor=20, min_px=6):
     return np.array([h_med, np.median(px[:, 1]), np.median(px[:, 2])])
 
 
-def find_nodes_in_frame(frame, debug=False, max_anchor_dist=None, thresh_method='adaptive_gaussian',
-                        use_hough=False):
+def find_nodes_in_frame(
+        frame, debug=False, max_anchor_dist=None, thresh_method='adaptive_gaussian',
+        use_hough=False, resolution=None
+    ):
     """find all circles in the blood web and clean them up to identify clickable nodes.
     thresh_method picks the binarization find_circles uses (adaptive_gaussian|otsu|canny) and
     use_hough swaps the localizer between the contour pass (default) and HoughCircles, both threaded
-    from detect() so the settings ui can tune them."""
+    from detect() so the settings ui can tune them. resolution (a Resolution, default
+    Resolution.from_frame(frame) inside find_circles) scales its rmin/rmax to this frame's size."""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) # (H,W,3), for the per-circle color read
-    circles = find_circles(frame, thresh_method=thresh_method, use_hough=use_hough, debug=False) # list of (x, y, r)
+    circles = find_circles(
+        frame, thresh_method=thresh_method, use_hough=use_hough,
+        debug=False, resolution=resolution
+    ) # list of (x, y, r)
 
     nodes = []
     for x, y, r in circles:
@@ -632,14 +647,17 @@ def classify_socket(node_contours, poly_tol=0.05):
         return 'square'
 
 
-def detect(frame, rows=None, hashes=None, ncc_templates=None, matcher="ncc", r_tol=1.5,
-           debug=False, thresh_method="adaptive_gaussian", use_hough=False):
+def detect(
+        frame, rows=None, hashes=None, ncc_templates=None, matcher="ncc", r_tol=1.5,
+        debug=False, thresh_method="adaptive_gaussian", use_hough=False, resolution=None
+    ):
     """full pipeline; returns per-node dicts {x, y, r, rar, cat, glyph_bgr, match, score, margin,
     matcher}. matcher picks identification: 'ncc' (default, plain z-normed cosine, higher=better),
     'ncc_masked' (cosine over the query's bright strokes, higher=better), or 'phash' (hamming,
     lower=better). score's direction follows the matcher (see _score_str). thresh_method picks the
     node-localization binarization (adaptive_gaussian|otsu|canny) and use_hough swaps the localizer
-    (contour pass vs HoughCircles), both passed down to find_circles."""
+    (contour pass vs HoughCircles), both passed down to find_circles. resolution (a Resolution,
+    default Resolution.from_frame(frame)) scales find_circles' rmin/rmax to this frame's size."""
     if rows is None:
         rows, hashes = load_index()
     if matcher == "phash" and hashes is None:
@@ -649,8 +667,10 @@ def detect(frame, rows=None, hashes=None, ncc_templates=None, matcher="ncc", r_t
     ncc_plain_T = ncc_plain_templates(ncc_templates) if matcher == "ncc" else None
 
     cats = np.array([r['category'] for r in rows]) # (n,) strings of 'item', 'perk', ...
-    nodes = find_nodes_in_frame(frame, debug=debug, thresh_method=thresh_method,
-                                use_hough=use_hough) # [(x, y, r, rarity), ...]
+    nodes = find_nodes_in_frame(
+        frame, debug=debug, thresh_method=thresh_method,
+        use_hough=use_hough, resolution=resolution
+    ) # [(x, y, r, rarity), ...]
 
     res = []
     # the center auto-spend node is found by its own glow color, not the disk pipeline, and gets
@@ -874,12 +894,13 @@ if __name__ == "__main__":
     args = ap.parse_args()
 
     # TODO: replace with auto bbox (detect-then-bound on the node cluster, no hardcoded coords)
-    web_bbox = {'x0': 300, 'y0': 200, 'xf': 1500, 'yf': 1300}
-
+    # web_bbox_fallback_px is Resolution's WEB_BBOX_FALLBACK sized to the loaded fixture, so this
+    # stays correct even on a fixture that isn't the 3440x1440 baseline.
     if args.cmd == "sample":
         _sample_window(args.fixture)
     elif args.cmd == "detect":
         frame = cv2.imread(str(args.fixture))
+        web_bbox = Resolution.from_frame(frame).web_bbox_fallback_px()
         frame = frame[web_bbox['y0']:web_bbox['yf'], web_bbox['x0']:web_bbox['xf']]
         nodes = detect(frame, matcher=args.matcher, debug=True)
         viz = draw_detections(frame, nodes)
@@ -891,6 +912,7 @@ if __name__ == "__main__":
         # captioned with output of detections (rarity/socket-shape, matched name, hamming dist + margin).
         # shows the per-node glyph/shape/match quality
         frame = cv2.imread(str(args.fixture))
+        web_bbox = Resolution.from_frame(frame).web_bbox_fallback_px()
         frame = frame[web_bbox['y0']:web_bbox['yf'], web_bbox['x0']:web_bbox['xf']]
         results = detect(frame, matcher=args.matcher, debug=True)
         items = []

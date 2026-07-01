@@ -20,13 +20,14 @@ from PIL import Image
 
 from .node import normalize_name
 from .ocr_runtime import get_tesserocr
+from .resolution import Resolution
 
-# bp value sits right anchored in the top bar, as fractions of frame w/h (calibrated 3440x1440).
-BP_REGION = (0.8765, 0.0472, 0.9215, 0.0764) # x0, y0, x1, y1
+# bp value sits right anchored in the top bar. the fraction itself lives on Resolution
+# (Resolution.BP_REGION) since it is one of the frame-fraction regions centralized there; read_bp
+# resolves resolution.BP_REGION off the frame it is given.
 BP_THRESH = 150 # binarize cutoff that keeps only the bright digits
 
 HOVER_DELAY_S = 0.1 # wait after move_to for dbd's tooltip to fade in
-PARK_XY = (0.52, 0.42) # neutral cursor rest in the empty fog right of the web, clears any tooltip
 DIFF_THRESH = 25 # binarize cutoff on the before/after change
 MIN_BOX_FRAC = 0.02 # the tooltip blob must cover at least this fraction of the frame
 NAME_BAND = 0.45 # ocr the top this fraction of the located box, where name and subhead live
@@ -34,10 +35,9 @@ FUZZY_CUTOFF = 0.8 # difflib ratio floor when no exact index hit
 
 # bloodweb auto-crop anchors: fixed ui labels whose ocr'd pixel boxes bound the web, so detection
 # can be cropped to the web and stray ui icons (settings/friends/prestige) never become fake nodes.
-# the boxes are stable per resolution, so find_web_bbox reads them once and the source caches it.
-ANCHOR_TOP_ZONE = (0.08, 0.03, 0.52, 0.24)  # SHARED PERKS (web left+top) + SPEND BLOODPOINTS (right)
-ANCHOR_BL_ZONE = (0.0, 0.82, 0.28, 1.0)     # BACK [ESC] button, sits just below the web bottom
-CROP_PAD_FRAC = 0.02                         # outward pad on left/top/right (bottom pads inward)
+# the zones are also frame fractions on Resolution (ANCHOR_TOP_ZONE/ANCHOR_BL_ZONE), stable per
+# resolution, so find_web_bbox reads them once off the frame and the source caches the result.
+CROP_PAD_FRAC = 0.02 # outward pad on left/top/right (bottom pads inward)
 
 _fold_cache = None # {normalized name: row}, built once from the index rows
 _apis = {} # cached PyTessBaseAPI per (psm, whitelist), reused so tesseract inits once
@@ -94,7 +94,7 @@ def _ocr_word_boxes(frame, zone, scale=2):
     return out
 
 
-def find_web_bbox(frame, pad_frac=CROP_PAD_FRAC):
+def find_web_bbox(frame, pad_frac=CROP_PAD_FRAC, resolution=None):
     """auto-locate the bloodweb's bounding box by ocr-ing fixed ui anchor labels, so detection can be
     cropped to the web (keeping stray ui icons like settings/friends/prestige out of the node
     detector). anchors, stable per resolution: 'SHARED PERKS' marks the web's left edge + top,
@@ -102,12 +102,14 @@ def find_web_bbox(frame, pad_frac=CROP_PAD_FRAC):
     full-frame pixels, or None when too few anchors are found (caller then uses the full frame).
     left/top/right pad OUTWARD; the bottom pads INWARD, because the settings/friends icon row sits
     just below the BACK button and an outward pad would re-include exactly those stray icons.
-    frame is the full bgr grab (h, w, 3)."""
+    frame is the full bgr grab (h, w, 3). resolution (a Resolution, default
+    Resolution.from_frame(frame)) supplies the anchor search zones."""
     if frame is None:
         return None
+    resolution = resolution or Resolution.from_frame(frame)
     h, w = frame.shape[:2]
-    top = _ocr_word_boxes(frame, ANCHOR_TOP_ZONE)
-    bl = _ocr_word_boxes(frame, ANCHOR_BL_ZONE)
+    top = _ocr_word_boxes(frame, resolution.ANCHOR_TOP_ZONE)
+    bl = _ocr_word_boxes(frame, resolution.ANCHOR_BL_ZONE)
 
     def box_of(words, *needles):
         return next((b for txt, b in words if any(n in txt for n in needles)), None)
@@ -134,17 +136,20 @@ def find_web_bbox(frame, pad_frac=CROP_PAD_FRAC):
     return (x0, y0, x1, y1)
 
 
-def read_bp(frame):
+def read_bp(frame, resolution=None):
     """current bloodpoint total from the top bar, or None if it cannot be read.
     crops the right anchored bp value, keeps the bright digits, ocrs them digit only.
     the loop compares this against config stop_bp_threshold to optionally stop spending.
-    frame is the full bgr grab (h, w, 3).
+    frame is the full bgr grab (h, w, 3). resolution (a Resolution, default
+    Resolution.from_frame(frame)) supplies the bp region.
     """
     if frame is None:
         return None
+    resolution = resolution or Resolution.from_frame(frame)
     h, w = frame.shape[:2]
-    x0, y0, x1, y1 = (int(BP_REGION[0] * w), int(BP_REGION[1] * h),
-                      int(BP_REGION[2] * w), int(BP_REGION[3] * h))
+    bp_region = resolution.BP_REGION
+    x0, y0, x1, y1 = (int(bp_region[0] * w), int(bp_region[1] * h),
+                      int(bp_region[2] * w), int(bp_region[3] * h))
     g = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
     g = cv2.resize(g, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC) # upscale, tesseract likes big glyphs
     _, th = cv2.threshold(g, BP_THRESH, 255, cv2.THRESH_BINARY)
@@ -227,7 +232,7 @@ def _match_name(lines, rows):
     return best
 
 
-def find_node_tooltip(node, frame, region, rows, hover_delay_s=None):
+def find_node_tooltip(node, frame, region, rows, hover_delay_s=None, resolution=None):
     """identify a node by hovering it and reading dbd's name tooltip, mutating node in place.
     detect routes here the nodes it could not trust (node.needs_resolution) rather than guessing.
     the tooltip is anchored to the node and flips side to stay on screen, so we park the cursor,
@@ -236,14 +241,17 @@ def find_node_tooltip(node, frame, region, rows, hover_delay_s=None):
     live only, the caller skips this when frame is None (the sim path).
     frame is the detection grab (h, w, 3) and region maps frame coords to screen.
     hover_delay_s overrides HOVER_DELAY_S (the tooltip fade-in wait); raise it if reads fail because
-    the tooltip hadn't appeared yet. None uses the default.
+    the tooltip hadn't appeared yet. None uses the default. resolution (a Resolution, default
+    Resolution.from_frame(frame)) supplies the park spot.
     """
     from . import capture, input_control # live deps imported lazily so ocr stays importable for tests
     hover_delay_s = HOVER_DELAY_S if hover_delay_s is None else hover_delay_s
+    resolution = resolution or Resolution.from_frame(frame)
     h, w = frame.shape[:2]
 
     # park off any node so the before frame holds no stale tooltip from a previous hover.
-    px, py = capture.frame_to_screen(int(PARK_XY[0] * w), int(PARK_XY[1] * h), region)
+    park_xy = resolution.PARK_XY
+    px, py = capture.frame_to_screen(int(park_xy[0] * w), int(park_xy[1] * h), region)
     input_control.move_to(px, py)
     before, _ = capture.grab_with_region(region)
 

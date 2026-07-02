@@ -210,21 +210,27 @@ def live_source(
     full frame is returned with coords mapped back to it so ocr and clicking are unaffected.
     crop = web_bbox if given, else ocr.find_web_bbox once (cached), else the full frame.
     """
-    state = {"bbox": tuple(web_bbox) if web_bbox else None, "logged": False}
+    state = {"bbox": tuple(web_bbox) if web_bbox else None, "masks": None, "logged": False}
 
     def _source():
         frame, reg = capture.grab_with_region(region)
-        if state["bbox"] is None and auto_crop:
-            state["bbox"] = ocr.find_web_bbox(frame, pad_frac=crop_pad_frac)  # cached after scan 1
-        bbox = state["bbox"]
+        if state["masks"] is None and auto_crop:  # find_web_bbox once, then cached (bbox + masks)
+            found, masks = ocr.find_web_bbox(frame, pad_frac=crop_pad_frac)
+            if state["bbox"] is None:            # keep a preset web_bbox but still take the masks
+                state["bbox"] = found
+            state["masks"] = masks
+        bbox, masks = state["bbox"], state["masks"] or []
         if not state["logged"]:                  # log the crop decision once
             if debug:
                 print(f"[crop] web bbox {bbox}" if bbox
                       else "[crop] no anchors found, using full frame (strays possible)")
+                if masks:
+                    print(f"[crop] masking {len(masks)} ui region(s) (perk row / spend button)")
             state["logged"] = True
 
         x0, y0 = (bbox[0], bbox[1]) if bbox else (0, 0)
         sub = frame[bbox[1]:bbox[3], bbox[0]:bbox[2]] if bbox else frame
+        sub = ocr.apply_ui_masks(sub, masks, origin=(x0, y0))
         # detect's own debug stays off: it pops blocking matplotlib windows, fatal in a live loop.
         dets = detect.detect(
             sub, rows=rows, ncc_templates=ncc_templates, matcher=matcher,

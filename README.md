@@ -28,7 +28,7 @@ present it clicks the center auto-spend to finish the level and move on.
 ---
 
 #### Alpha (ready for small test group)
-- [ ] make robust across resolutions
+- [x] make robust across resolutions
 - [ ] detect: switch to custom trained CNN
     - [ ] data labelling util
     - [ ] train model
@@ -38,12 +38,12 @@ present it clicks the center auto-spend to finish the level and move on.
 - [x] auto determine bbox for bloodweb frame crop.
 - [x] fix non-breaking UI bugs
 - [ ] add within tier priority selection
-- [ ] (if needed) HSV calibration/fine tuning option for color masking
 
 #### Beta (some smart nice to have features)
 - [ ] Entity aware node selection
 - [ ] bloodweb prestige/level spending cap
 - [ ] auto pause when detecting bloodweb no longer visible
+- [ ] ui drag and drop priority elements
 
 ## Setup
 

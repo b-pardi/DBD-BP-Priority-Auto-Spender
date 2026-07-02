@@ -8,6 +8,8 @@ __pycache__/
 data/icons/*
 !data/icons/.gitkeep
 data/icons_index.json
+data/labels
+data/*.npy
 
 # ncc template cache, rebuilt on demand from the sprites by detect.load_ncc_templates
 data/*.ncc*.npy

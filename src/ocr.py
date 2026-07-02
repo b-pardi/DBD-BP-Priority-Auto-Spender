@@ -94,18 +94,69 @@ def _ocr_word_boxes(frame, zone, scale=2):
     return out
 
 
+def _union_box(boxes):
+    """smallest box (x0,y0,x1,y1) covering all given word boxes, or None when empty.
+    used to rebuild a multi-word label's full box from its per-word ocr boxes."""
+    if not boxes:
+        return None
+    return (min(b[0] for b in boxes), min(b[1] for b in boxes),
+            max(b[2] for b in boxes), max(b[3] for b in boxes))
+
+
+def _ui_masks(top_words):
+    """rectangles (full-frame px) to blank out before detection so ui glyphs sitting just under the
+    top anchor labels can't be mistaken for bloodweb nodes: the character 'SHARED PERKS' row (its 3
+    perk icons, informational only) and the 'SPEND BLOODPOINTS' button. each rect is anchored to its
+    label's ocr'd text box so it tracks resolution. top_words is _ocr_word_boxes' top-zone output."""
+    masks = []
+    perks = _union_box([b for txt, b in top_words if "SHARED" in txt or "PERK" in txt])
+    if perks:
+        tx0, ty0, tx1, ty1 = perks
+        wdt, hgt = tx1 - tx0, ty1 - ty0
+        # from the text's bottom-left: right 1.5x its width, down 3x its height (the perk-icon row)
+        masks.append((tx0, ty1, int(tx0 + 1.5 * wdt), int(ty1 + 3 * hgt)))
+    spend = _union_box([b for txt, b in top_words if "SPEND" in txt or "BLOODPOINTS" in txt])
+    if spend:
+        tx0, ty0, tx1, ty1 = spend
+        hgt = ty1 - ty0
+        mid = (tx0 + tx1) // 2
+        # from the text's bottom-midpoint to its right edge, down 4x its height (the spend button)
+        masks.append((mid, ty1, tx1, int(ty1 + 4 * hgt)))
+    return masks
+
+
+def apply_ui_masks(sub, masks, origin=(0, 0)):
+    """blank out the _ui_masks rectangles on a detection crop so their glyphs can't become fake
+    nodes. masks are full-frame (x0,y0,x1,y1); origin is the crop's top-left (x0,y0) so the rects
+    map into sub's local coords. copies first (sub is a view of the returned full frame), fills the
+    rects black, and returns the copy; a no-op (returns sub unchanged) when there are no masks."""
+    if not masks:
+        return sub
+    sub = sub.copy()
+    h, w = sub.shape[:2]
+    ox, oy = origin
+    for mx0, my0, mx1, my1 in masks:
+        x0, y0 = max(mx0 - ox, 0), max(my0 - oy, 0)
+        x1, y1 = min(mx1 - ox, w), min(my1 - oy, h)
+        if x1 > x0 and y1 > y0:
+            sub[y0:y1, x0:x1] = 0
+    return sub
+
+
 def find_web_bbox(frame, pad_frac=CROP_PAD_FRAC, resolution=None):
     """auto-locate the bloodweb's bounding box by ocr-ing fixed ui anchor labels, so detection can be
     cropped to the web (keeping stray ui icons like settings/friends/prestige out of the node
     detector). anchors, stable per resolution: 'SHARED PERKS' marks the web's left edge + top,
-    'SPEND BLOODPOINTS' the right edge, 'BACK [ESC]' the bottom. returns (x0, y0, x1, y1) in
-    full-frame pixels, or None when too few anchors are found (caller then uses the full frame).
+    'SPEND BLOODPOINTS' the right edge, 'BACK [ESC]' the bottom. returns (bbox, masks): bbox is
+    (x0, y0, x1, y1) in full-frame pixels, or None when too few anchors are found (caller then uses
+    the full frame); masks is a list of _ui_masks rects (full-frame px) the caller blanks out via
+    apply_ui_masks so the shared-perks row and spend button never register as nodes.
     left/top/right pad OUTWARD; the bottom pads INWARD, because the settings/friends icon row sits
     just below the BACK button and an outward pad would re-include exactly those stray icons.
     frame is the full bgr grab (h, w, 3). resolution (a Resolution, default
     Resolution.from_frame(frame)) supplies the anchor search zones."""
     if frame is None:
-        return None
+        return None, []
     resolution = resolution or Resolution.from_frame(frame)
     h, w = frame.shape[:2]
     top = _ocr_word_boxes(frame, resolution.ANCHOR_TOP_ZONE)
@@ -120,20 +171,22 @@ def find_web_bbox(frame, pad_frac=CROP_PAD_FRAC, resolution=None):
     # take the max right edge over both rather than the first match (SPEND alone stops short).
     right_boxes = [b for txt, b in top if "BLOODPOINTS" in txt or "SPEND" in txt]
 
+    masks = _ui_masks(top)                        # perk row + spend button, independent of the bbox
+
     left = shared[0] if shared else None
     right = max((b[2] for b in right_boxes), default=None)
     bottom = back[1] if back else None
     tops = [b[1] for b in right_boxes] + ([shared[1]] if shared else [])
     top_y = min(tops, default=None)
     if None in (left, right, bottom, top_y):
-        return None                              # not enough anchors, fall back to the full frame
+        return None, masks                       # not enough anchors, fall back to the full frame
 
     pad = int(pad_frac * h)
     x0, y0 = max(left - pad, 0), max(top_y - pad, 0)
     x1, y1 = min(right + pad, w), min(bottom - pad, h)  # bottom pads inward, clearing the icon row
     if x1 - x0 < 0.2 * w or y1 - y0 < 0.2 * h:
-        return None                              # implausibly small, treat as a failed read
-    return (x0, y0, x1, y1)
+        return None, masks                       # implausibly small, treat as a failed read
+    return (x0, y0, x1, y1), masks
 
 
 def read_bp(frame, resolution=None):

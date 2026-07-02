@@ -37,6 +37,7 @@ run (needs the conda env):
 """
 
 import sys
+import json
 import argparse
 from pathlib import Path
 import cv2
@@ -47,9 +48,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 from src import detect as D
 from src import paths
+from src.resolution import Resolution
 
-# the fixture crop the gold coords were read against (auto-bbox is deferred, so this stays fixed).
-WEB_BBOX = {'x0': 300, 'y0': 200, 'xf': 1500, 'yf': 1300}
+# the fixture crop the gold coords were read against, single-sourced from Resolution (the baseline
+# fixtures are 3440x1440 so this stays {x0:300, y0:200, xf:1500, yf:1300}).
+WEB_BBOX = Resolution().web_bbox_fallback_px()
 
 # 6 hand-labeled gold/event nodes: {fixture: {(x, y) in the cropped frame: expected key}}.
 GOLD = {
@@ -340,23 +343,90 @@ def eval_gold(lib, name, fn, kind, verbose=False):
     return correct, total, agree
 
 
+def load_real_labels(path=None):
+    """the annotator's real labeled nodes (data/labels/real_nodes.json), resolved keys only. this
+    is the honest B judge, since a real crop and a rendered template no longer share a generator
+    (unlike synth). returns [] if the file is absent."""
+    path = path or (ROOT / "data" / "labels" / "real_nodes.json")
+    if not Path(path).is_file():
+        return []
+    return [r for r in json.loads(Path(path).read_text("utf-8")) if r.get("key")]
+
+
+def eval_real(lib, name, fn, kind, verbose=False):
+    """score a matcher on the annotator's real labeled crops. crop matchers get the saved 1.3*r box
+    crop directly (the annotator's BOX_K matches ours); glyph matchers re-extract the glyph via
+    isolate_node_contents + normalize_glyph off the crop center. a label whose key is not in the
+    matchable library (dropped as unavailable, or a stale/alias key) is skipped, not scored.
+    returns (records, higher, correct, total, skipped); records = [(correct_bool, score)]."""
+    rows = lib["rows"]
+    keyset = {r["key"] for r in rows}
+    higher = name != "phash"
+    records = []
+    correct = total = skipped = 0
+    for rec in load_real_labels():
+        want = rec["key"]
+        crop = cv2.imread(str(ROOT / rec["crop_path"]))
+        if want not in keyset or crop is None:
+            skipped += 1
+            continue
+        rarity = rec.get("rarity")
+        if kind == "glyph":
+            r = int(rec.get("r") or round(min(crop.shape[:2]) / (2 * BOX_K)))
+            cy, cx = crop.shape[0] // 2, crop.shape[1] // 2
+            iso = D.isolate_node_contents(crop, cx, cy, r, rarity)
+            if iso is None:
+                skipped += 1
+                continue
+            glyph = D.normalize_glyph(iso[4], iso[3])         # iso = (cx, cy, r, contour, crop)
+            if glyph is None:
+                skipped += 1
+                continue
+            row, score, _ = fn(glyph)
+        else:
+            if rarity not in DISK_BGR:                        # crop matcher needs a known disk
+                skipped += 1
+                continue
+            row, score, _ = fn(crop, rarity)
+        hit = row["key"] == want
+        correct += hit
+        total += 1
+        records.append((hit, score))
+        if verbose and not hit:
+            stem = rec["crop_path"].replace("\\", "/").split("/")[-1]
+            print(f"   {stem:22s} want={want:18s} -> {row['key']:18s} score={score:6.3f} rar={rarity}")
+    return records, higher, correct, total, skipped
+
+
 # ------------------------------------------------------------------------------------- commands
 
 def cmd_compare(args):
     lib = load_matchable()
     reg = build_registry(lib)
-    print(f"\nmatcher comparison  (synth N={args.n} seed={args.seed} noise={args.noise}, no pool "
-          f"| gold 6 real)\n")
-    print(f"{'matcher':12} {'kind':6} {'synth top1':>11} {'synth conf50':>13} {'gold':>6}")
+    n_real = len(load_real_labels())
+    print(f"\nmatcher comparison  (synth N={args.n} seed={args.seed} noise={args.noise} | "
+          f"real {n_real} labeled | gold 6, no pool)\n")
+    print(f"{'matcher':12} {'kind':6} {'synth':>7} {'real top1':>10} {'real conf50':>12} {'gold':>6}")
     for name, (kind, fn) in reg.items():
-        recs, higher = eval_synth(lib, name, fn, kind, n=args.n, seed=args.seed, noise=args.noise)
-        top1, conf, _ = summarize(recs, higher)
+        srecs, shigh = eval_synth(lib, name, fn, kind, n=args.n, seed=args.seed, noise=args.noise)
+        stop1, _, _ = summarize(srecs, shigh)
+        rrecs, rhigh, _, _, _ = eval_real(lib, name, fn, kind)
+        rtop1, rconf, _ = summarize(rrecs, rhigh)
         gok, gtot, _ = eval_gold(lib, name, fn, kind)
         star = "*" if kind == "crop" else " "
-        print(f"{name:12} {kind:6} {top1:10.1f}% {conf:12.1f}% {gok:4}/{gtot}{star}")
-    print("\n* crop_* synth is circular (templates and queries both from render_node); it is a "
-          "plumbing smoke test only.\n  judge crop_* on the gold column (and the real labeled set "
-          "once the annotator lands).")
+        print(f"{name:12} {kind:6} {stop1:5.1f}%{star} {rtop1:9.1f}% {rconf:11.1f}% {gok:4}/{gtot}")
+    print("\n* crop_* synth is circular (templates and queries both from render_node), ignore it; "
+          "judge crop_* on real/gold.\n  real conf50 = accuracy over the most-confident half, the "
+          "production-relevant (fewer-OCR-hovers) metric.")
+
+
+def cmd_real(args):
+    lib = load_matchable()
+    kind, fn = build_registry(lib)[args.matcher]
+    print(f"{args.matcher} on the real labeled set (misses shown):")
+    records, higher, correct, total, skipped = eval_real(lib, args.matcher, fn, kind, verbose=True)
+    top1, conf, _ = summarize(records, higher)
+    print(f"   => {correct}/{total} correct ({top1:.1f}%), conf50={conf:.1f}%, {skipped} skipped")
 
 
 def cmd_synth(args):
@@ -397,6 +467,10 @@ if __name__ == "__main__":
     s_gld = sub.add_parser("gold", help="one matcher on the 6 real gold nodes")
     s_gld.add_argument("--matcher", choices=MATCHER_NAMES, default="ncc")
     s_gld.set_defaults(func=cmd_gold)
+
+    s_real = sub.add_parser("real", help="one matcher on the annotator's real labeled set")
+    s_real.add_argument("--matcher", choices=MATCHER_NAMES, default="crop_resid")
+    s_real.set_defaults(func=cmd_real)
 
     args = ap.parse_args()
     args.func(args)

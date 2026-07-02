@@ -32,7 +32,7 @@ CROPS_DIR = LABELS_DIR / "crops"
 LABELS_JSON = LABELS_DIR / "real_nodes.json"
 
 BOX_K = 1.3       # node crop half-width in node radii, matches eval_matchers.BOX_K
-GALLERY_COLS = 6   # columns in the review gallery
+GALLERY_COLS = 8   # columns in the review gallery
 
 STARTUP_S = 3.0    # seconds to switch focus to the game before capture fires
 
@@ -95,12 +95,24 @@ def _lookup_key(text, rows):
 # --------------------------------------------------------------- gallery review
 
 def _gallery_review(entries, rows):
-    """interactive matplotlib gallery: show crops + captions, let the user click cells to flag
-    them for relabeling (red border), close the window to confirm. then for each flagged cell
-    a terminal prompt asks for the correct key (enter=keep, 'drop'=null, 'skip'=exclude).
-    matplotlib only; this conda opencv build has no highgui backend.
+    """interactive matplotlib gallery for reviewing detected nodes before saving labels.
+
+    each cell shows the crop plus a caption with the final label (ocr when resolved, else
+    UNRESOLVED), the detector's guess and score, and rarity/shape. the final label is always
+    the ocr read when it resolved; the detector guess is shown for comparison only and is never
+    auto-promoted (it may be wrong).
+
+    two click actions:
+      left click  = wrong label (orange border). node is a real bloodweb node but the identity
+                    is incorrect. fires a terminal prompt after the gallery closes.
+      right click = false detection (red border). not a real bloodweb node at all (background
+                    object, ui chrome, etc.). saved as source='false_detection', key=null.
+
+    close the window to confirm all current states. then terminal prompts fire for each
+    orange (relabel) cell: enter=keep current label, type a name/key=relabel, 'skip'=exclude.
+
     entries is the list of record dicts, each with a 'crop_bgr' key for the image.
-    rows is the full index, needed for key lookup after the terminal prompts.
+    rows is the full index, for key lookup in the terminal prompts.
     returns the same list with 'source' and 'key' updated per the user's choices."""
 
     n = len(entries)
@@ -108,16 +120,16 @@ def _gallery_review(entries, rows):
     nrows = (n + cols - 1) // cols
     fig, axes = plt.subplots(
         nrows, cols, squeeze=False,
-        figsize=(cols * 2.2, nrows * 2.8)
+        figsize=(cols * 3.5, nrows * 4.0)
     )
     axes_flat = axes.ravel()
-    marked = [False] * n
+    # per-cell state: None=ok, 'relabel'=wrong label (left click), 'false'=false detection (right click)
+    state = [None] * n
 
     def _cell_caption(e):
-        ocr_lbl = e["key"] or "UNRESOLVED"
-        det_key = (e["matcher_guess"] or "?")[:20]
-        sc = e["score"]
-        return f"ocr: {ocr_lbl}\ndet: {det_key} s{sc:.2f}\n{e['rarity']}/{e['shape']}"
+        label = e["key"] or "UNRESOLVED"
+        det = (e["matcher_guess"] or "?")[:20]
+        return f"label: {label}\ndet: {det} s{e['score']:.2f}\n{e['rarity']}/{e['shape']}"
 
     def _redraw(i):
         ax = axes_flat[i]
@@ -130,10 +142,11 @@ def _gallery_review(entries, rows):
             ax.imshow(np.zeros((8, 8, 3), np.uint8))
         ax.set_title(_cell_caption(e), fontsize=6, pad=2)
         ax.axis("off")
-        if marked[i]:
+        color = {"relabel": "orange", "false": "red"}.get(state[i])
+        if color:
             rect = mpatches.Rectangle(
                 [0, 0], 1, 1, fill=False,
-                edgecolor="red", linewidth=4,
+                edgecolor=color, linewidth=4,
                 transform=ax.transAxes, clip_on=False
             )
             ax.add_patch(rect)
@@ -144,17 +157,20 @@ def _gallery_review(entries, rows):
         ax.axis("off")
 
     fig.suptitle(
-        "click cells to flag for relabeling (red border)  |  close window to confirm",
+        "left click = wrong label (orange)  |  right click = false detection (red)  |  close to confirm",
         fontsize=9
     )
-    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    # skip tight_layout entirely — it fights wspace=0 and re-introduces horizontal gaps.
+    # set all margins explicitly so wspace=0 actually sticks.
+    fig.subplots_adjust(left=0.01, right=0.99, top=0.93, bottom=0.01, hspace=0.35, wspace=0.0)
 
     def on_click(event):
-        if event.inaxes is None:
+        if event.inaxes is None or event.button not in (1, 3):
             return
+        action = "relabel" if event.button == 1 else "false"
         for i, ax in enumerate(axes_flat[:n]):
             if event.inaxes is ax:
-                marked[i] = not marked[i]
+                state[i] = None if state[i] == action else action  # toggle off if already set
                 _redraw(i)
                 fig.canvas.draw_idle()
                 break
@@ -162,21 +178,46 @@ def _gallery_review(entries, rows):
     fig.canvas.mpl_connect("button_press_event", on_click)
     plt.show()   # blocks until the window is closed
 
-    # terminal prompts for flagged cells, after the matplotlib event loop exits
+    # handle false detections first: mark and move on, no prompt needed
     for i, e in enumerate(entries):
-        if not marked[i]:
-            continue
+        if state[i] == "false":
+            e["key"] = None
+            e["source"] = "false_detection"
+
+    # terminal prompts for relabel cells, each showing the crop in a small window
+    relabel_cells = [(i, e) for i, e in enumerate(entries) if state[i] == "relabel"]
+    for n_done, (i, e) in enumerate(relabel_cells):
+        ocr_lbl = e["key"] or "UNRESOLVED"
+        det_lbl = e["matcher_guess"] or "?"
+
+        # open a small crop window so the user can see what they're labeling
+        crop_fig, crop_ax = plt.subplots(figsize=(3.5, 3.5))
+        img = e.get("crop_bgr")
+        if img is not None and img.size:
+            crop_ax.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        else:
+            crop_ax.imshow(np.zeros((8, 8, 3), np.uint8))
+        crop_ax.set_title(
+            f"node {i:02d}  ({n_done + 1}/{len(relabel_cells)})\n"
+            f"label: {ocr_lbl}\ndet: {det_lbl} s{e['score']:.2f}",
+            fontsize=8
+        )
+        crop_ax.axis("off")
+        crop_fig.tight_layout()
+        plt.show(block=False)
+        plt.pause(0.05)  # pump the event loop long enough for the window to appear
+
         print(f"\n--- node {i:02d}: {e['crop_path']} ---")
-        print(f"  proposed (ocr): {e['key'] or 'UNRESOLVED'}")
-        print(f"  matcher guess:  {e['matcher_guess'] or '?'} s{e['score']:.2f}")
+        print(f"  current label: {ocr_lbl}")
+        print(f"  detector guess: {det_lbl} s{e['score']:.2f}")
         print(f"  rarity/shape:   {e['rarity']}/{e['shape']}")
-        print("  enter=keep  |  type a name/key=relabel  |  'drop'=null key  |  'skip'=exclude")
+        keep_hint = f"keep as '{ocr_lbl}'" if e["key"] else "keep as unresolved"
+        print(f"  enter={keep_hint}  |  type a name/key=relabel  |  'skip'=exclude")
         resp = input("  > ").strip()
+        plt.close(crop_fig)
+
         if resp == "skip":
             e["_skip"] = True
-        elif resp == "drop":
-            e["key"] = None
-            e["source"] = "manual"
         elif resp:
             found_key, found_name = _lookup_key(resp, rows)
             if found_key:
@@ -186,14 +227,14 @@ def _gallery_review(entries, rows):
                 print(f"    '{resp}' not found in index, saving raw text as key")
                 e["key"] = resp
             e["source"] = "manual"
-        # enter with no text keeps the current e["key"] and e["source"] unchanged
+        # enter with no text: keep e["key"] and e["source"] as-is
 
     return entries
 
 
 # ------------------------------------------------------------- main annotator
 
-def annotate_web(matcher="ncc", hover_delay_s=None):
+def annotate_web(matcher="ncc", hover_delay_s=None, use_hough=False):
     """capture the current web, detect + ocr each node, review in a gallery, append labels."""
     print("[annotate] loading index and ncc templates...")
     rows, _ = detect.load_index()
@@ -206,7 +247,7 @@ def annotate_web(matcher="ncc", hover_delay_s=None):
     print(f"[annotate] capturing web {web_id}...")
 
     frame, region = capture.grab_with_region()
-    bbox = ocr.find_web_bbox(frame)
+    bbox, masks = ocr.find_web_bbox(frame)
     if bbox:
         x0, y0, x1, y1 = bbox
         sub = frame[y0:y1, x0:x1]
@@ -215,11 +256,13 @@ def annotate_web(matcher="ncc", hover_delay_s=None):
         x0, y0 = 0, 0
         sub = frame
         print("[annotate] no bbox found, using full frame (stray detections possible)")
+    sub = ocr.apply_ui_masks(sub, masks, origin=(x0, y0))  # drop the perk row / spend button
 
-    print("[annotate] running detect pipeline...")
+    finder = "hough" if use_hough else "contours"
+    print(f"[annotate] running detect pipeline (node_finder={finder})...")
     dets = detect.detect(
         sub, rows=rows, ncc_templates=ncc_templates,
-        matcher=matcher, debug=False
+        matcher=matcher, use_hough=use_hough, debug=False
     )
     for d in dets:
         d["x"] += x0
@@ -249,6 +292,9 @@ def annotate_web(matcher="ncc", hover_delay_s=None):
         if node.resolved_by == "ocr" and node.match:
             proposed_key = node.match.get("key")
             source = "ocr"
+        elif matcher_guess:
+            proposed_key = matcher_guess
+            source = "matcher"
         else:
             proposed_key = None
             source = "unresolved"
@@ -306,5 +352,13 @@ if __name__ == "__main__":
         "--hover-delay", type=float, default=None,
         help="seconds to wait after hovering for dbd tooltip fade-in (default uses ocr.HOVER_DELAY_S)"
     )
+    ap.add_argument(
+        "--node-finder", choices=("contours", "hough"), default="contours",
+        help="circle detection method: contours (default) or hough"
+    )
     args = ap.parse_args()
-    annotate_web(matcher=args.matcher, hover_delay_s=args.hover_delay)
+    annotate_web(
+        matcher=args.matcher,
+        hover_delay_s=args.hover_delay,
+        use_hough=(args.node_finder == "hough")
+    )

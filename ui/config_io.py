@@ -29,17 +29,23 @@ def ensure_profiles(cfg):
     profiles are a ui-only concept (named priority lists for survivor / killer / per-killer). the
     engine and cli only ever read `priorities`, so we point that at the active profile and they stay
     oblivious. an older file with just a flat `priorities` is seeded into a single 'Default' profile.
-    settings (hotkeys, matcher, dry-run, ...) stay global, outside profiles, by design."""
+    settings (hotkeys, matcher, dry-run, ...) stay global, outside profiles, by design.
+
+    each profile's tiers are run through spender.normalize_tiers so the ui always sees the canonical
+    per-tier shape ({"rules": [...], "ordered": bool}) regardless of how the file stored them (a
+    reverted/hand-edited file may hold bare-list tiers); the active profile is then mirrored into the
+    top-level `priorities` the engine reads."""
     profiles = cfg.get("profiles")
     if not isinstance(profiles, dict) or not profiles:
-        cfg["profiles"] = {DEFAULT_PROFILE: cfg.get("priorities", [])}
+        cfg["profiles"] = {DEFAULT_PROFILE: spender.normalize_tiers(cfg.get("priorities", []))}
         cfg["active_profile"] = DEFAULT_PROFILE
     else:
+        cfg["profiles"] = {name: spender.normalize_tiers(tiers) for name, tiers in profiles.items()}
         active = cfg.get("active_profile")
-        if active not in profiles:
-            active = next(iter(profiles))
+        if active not in cfg["profiles"]:
+            active = next(iter(cfg["profiles"]))
         cfg["active_profile"] = active
-        cfg["priorities"] = profiles[active]
+    cfg["priorities"] = cfg["profiles"][cfg["active_profile"]]
     return cfg
 
 

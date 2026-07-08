@@ -25,7 +25,8 @@ from ctypes import wintypes
 from pathlib import Path
 
 from . import capture, detect, input_control, ocr, paths
-from .node import Node
+from .node import Node, build_pool_mask, tier_rules, tier_is_ordered
+from .resolution import Resolution
 from .sim import sim_source
 
 KILL_KEY = "f8"      # dedicated always-stop panic hotkey, only ever stops, never resumes
@@ -34,16 +35,16 @@ SETTLE_S = 0.6       # post-buy wait before the rescan, tune live like input_con
 ADVANCE_S = 3.0      # post-auto-spend wait for the fill + level transition to play out
 IDLE_POLL_S = 0.05   # how often the loop re-checks the switch while idle or paused
 REPICK_TOL_PX = 20   # spot-match tolerance for the don't-repick guard, tune with node spacing
+PARK_TOL_PX = 25     # how far the cursor may drift from PARK_XY before a scan re-parks it
+PARK_FADE_S = 0.5    # post-re-park wait for a hovered tooltip to fade before the re-grab
 
 DEFAULT_CONFIG = paths.config_path()   # frozen-aware: repo config/ in dev, %APPDATA%/dbdbp when frozen
 VALID_CATEGORIES = {"item", "addon", "offering", "perk", "power"}
 VALID_RARITIES = {"common", "uncommon", "rare", "very rare", "ultra rare", "event"}
-# win32 global-hotkey plumbing for the run control.
-# RegisterHotKey reserves the key system-wide and posts WM_HOTKEY to our own message loop, so it
-# fires no matter which window has focus, including once dbd is foreground and we start clicking.
-# the old keyboard-lib low-level hook only landed while the terminal had focus (a fullscreen game
-# can swallow hook keys). caveat: if dbd runs elevated (as admin), launch this script elevated too
-# or windows blocks the keys from the lower-integrity process (UIPI).
+# win32 global-hotkey plumbing for the run control. RegisterHotKey reserves the key system-wide and
+# posts WM_HOTKEY to our own message loop, so it fires no matter which window has focus (including a
+# foreground dbd we're clicking in); the old keyboard-lib hook only landed while the terminal had
+# focus. caveat: if dbd runs elevated, launch this elevated too or windows (UIPI) blocks the keys.
 _MOD_NOREPEAT = 0x4000   # don't auto-repeat the hotkey while the key is held
 _WM_HOTKEY = 0x0312
 _user32 = ctypes.windll.user32
@@ -74,9 +75,9 @@ class Switch:
       idle     launch default, armed but doing nothing (no capture, no input)
       running  start pressed, the loop does its work
       paused   start pressed again, the loop idles but stays ready to resume
-    one class instead of two because the states are coupled: start toggles running<->paused,
-    while kill force-idles from anywhere and latches, so the panic key only ever stops.
-    arm() starts the listener and returns self, leaving the control idle; the loop polls."""
+    one class not two because the states are coupled: start toggles running<->paused, while kill
+    force-idles from anywhere and latches, so the panic key only ever stops. arm() starts the
+    listener and returns self, leaving the control idle; the loop polls."""
 
     def __init__(self, start_key=START_KEY, kill_key=KILL_KEY):
         self.start_key = start_key
@@ -152,31 +153,72 @@ def _validate_rule(rule, where="rule"):
         raise ValueError(f"{where}: bad rarity {rarity!r}")
 
 
+def normalize_tier(tier):
+    """coerce one serialized tier into the canonical in-memory shape {"rules": [...], "ordered": bool}.
+    accepts every shape the file format has carried, so old configs and hand-edits load unchanged:
+      v1: a bare rule dict            -> its own singleton (unordered) tier
+      v2: a list of rule dicts        -> an unordered tier
+      v3: {"rules": [...], "ordered"} -> passed through (the within-tier ordering feature)."""
+    if isinstance(tier, dict) and "rules" in tier:
+        return {"rules": list(tier.get("rules") or []), "ordered": bool(tier.get("ordered", False))}
+    if isinstance(tier, dict):                      # a single v1 rule dict
+        return {"rules": [tier], "ordered": False}
+    return {"rules": list(tier or []), "ordered": False}   # v2 list tier
+
+
+def normalize_tiers(tiers):
+    """normalize a whole priority list (list of tiers) to the canonical per-tier shape."""
+    return [normalize_tier(t) for t in (tiers or [])]
+
+
+def copy_tier(tier):
+    """canonical-shape copy of a tier with fresh rule dicts, for the ui's edit buffer."""
+    return {"rules": [dict(r) for r in tier_rules(tier)], "ordered": tier_is_ordered(tier)}
+
+
+def copy_tiers(tiers):
+    """copy a whole priority list, each tier deep-ish copied (see copy_tier)."""
+    return [copy_tier(t) for t in (tiers or [])]
+
+
+def serialize_tier(tier):
+    """compact on-disk form for one tier: a plain list of rules when unordered (so existing files
+    stay byte-for-byte the same shape they were), a {"rules": [...], "ordered": true} dict only when
+    the tier is ordered, so the flag round-trips without cluttering every other tier."""
+    rules = [dict(r) for r in tier_rules(tier)]
+    return {"rules": rules, "ordered": True} if tier_is_ordered(tier) else rules
+
+
+def serialize_tiers(tiers):
+    """serialize a whole priority list to its compact on-disk form (see serialize_tier)."""
+    return [serialize_tier(t) for t in (tiers or [])]
+
+
 def load_config(path=None):
-    """read and lightly validate the priority config (schema v2: tiered).
-    `priorities` is an ordered list of tiers, each tier a list of rule dicts; within a tier the
-    engine picks randomly across every matching node (no within-tier order, see choose_next).
-    a v1 config (a flat list of rule dicts) is migrated on read by wrapping each rule in its own
-    singleton tier, so old files still load with identical strict-rank semantics.
+    """read and lightly validate the priority config (schema v3: tiered, tiers optionally ordered).
+    `priorities` is an ordered list of tiers; each tier is {"rules": [rule, ...], "ordered": bool}.
+    tiers rank strictly high to low. within a tier, an ordered tier prefers the earliest matching
+    rule (top = first pick) while a normal tier picks at random across every match (see choose_next).
+    a v1 config (flat list of rule dicts) or a v2 config (list of bare-list tiers) is migrated on
+    read by normalize_tiers, so old files still load with identical semantics (all tiers unordered).
     returns the parsed dict; raises ValueError on a malformed rule and lets a missing file raise
     FileNotFoundError, so a bad config fails fast at startup instead of silently never matching."""
     path = Path(path) if path else DEFAULT_CONFIG
     with open(path, encoding="utf-8") as f:
         cfg = json.load(f)
 
-    # migrate v1 (flat list of rule dicts) -> v2 (list of tiers): a dict entry becomes a singleton
-    # tier, a list entry is already a v2 tier and passes through.
-    tiers = [[entry] if isinstance(entry, dict) else entry for entry in cfg.get("priorities", [])]
-    cfg["priorities"] = tiers
-
-    for t, tier in enumerate(tiers):
-        if not isinstance(tier, list):
-            raise ValueError(f"priorities[{t}]: tier must be a list of rules")
-        for i, rule in enumerate(tier):
+    cfg["priorities"] = normalize_tiers(cfg.get("priorities", []))
+    for t, tier in enumerate(cfg["priorities"]):
+        for i, rule in enumerate(tier_rules(tier)):
             _validate_rule(rule, where=f"priorities[{t}][{i}]")
 
     cfg.setdefault("dry_run", True)
     cfg.setdefault("stop_bp_threshold", 0)
+    # comparison-pool narrowing (see node.build_pool_mask): inferred (each priority item's whole
+    # bloodweb source) on by default, exclusive (only the listed icons) off. exclusive is a subset
+    # of inferred, so the ui keeps inferred forced on whenever exclusive is set.
+    cfg.setdefault("pool_inferred", True)
+    cfg.setdefault("pool_exclusive", False)
     # ui-only display prefs (the engine ignores them); kept here so the single serializer round-trips
     # them and they default sanely on an older file. see ui.widgets.tooltip + ui.library.filter.
     cfg.setdefault("show_tooltips", True)
@@ -185,45 +227,84 @@ def load_config(path=None):
 
 
 def save_config(cfg, path=None):
-    """write the priority+settings config back as json (schema v2), validating first so we never
+    """write the priority+settings config back as json (schema v3), validating first so we never
     persist a broken file. round-trips what load_config returns and stays human-editable (indent=2).
-    the ui calls this on Save; it is the single serializer for the file."""
+    every tier (in `priorities` and any named `profiles`) is written through serialize_tier, so an
+    unordered tier stays a plain list and only ordered tiers gain the {"rules","ordered"} wrapper.
+    the passed cfg is not mutated (the on-disk shapes are built into a copy). single serializer for
+    the file; the ui calls it on Save."""
     path = Path(path) if path else DEFAULT_CONFIG
     for t, tier in enumerate(cfg.get("priorities", [])):
-        if not isinstance(tier, list):
-            raise ValueError(f"priorities[{t}]: tier must be a list of rules")
-        for i, rule in enumerate(tier):
+        for i, rule in enumerate(tier_rules(tier)):
             _validate_rule(rule, where=f"priorities[{t}][{i}]")
+    for name, tiers in (cfg.get("profiles") or {}).items():
+        for t, tier in enumerate(tiers):
+            for i, rule in enumerate(tier_rules(tier)):
+                _validate_rule(rule, where=f"profiles[{name}][{t}][{i}]")
+    out = dict(cfg)
+    out["priorities"] = serialize_tiers(cfg.get("priorities", []))
+    if cfg.get("profiles"):
+        out["profiles"] = {name: serialize_tiers(tiers) for name, tiers in cfg["profiles"].items()}
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
     return path
 
 
 # node sources from live capture
 def live_source(
-        rows, ncc_templates, region=None, matcher="ncc",
+        rows, ncc_templates, region=None, matcher="cnn",
         thresh_method="adaptive_gaussian", use_hough=False, auto_crop=True, web_bbox=None,
-        crop_pad_frac=ocr.CROP_PAD_FRAC, debug=False,
+        crop_pad_frac=ocr.CROP_PAD_FRAC, debug=False, row_pool=None,
     ):
     """() -> (frame, region, nodes) source backed by the real screen + detect().
     detection runs on a bloodweb crop so stray ui icons can't become fake click targets, but the
     full frame is returned with coords mapped back to it so ocr and clicking are unaffected.
     crop = web_bbox if given, else ocr.find_web_bbox once (cached), else the full frame.
+    row_pool (a bool sequence aligned to rows, or None) narrows detect's match library to the
+    priority list's icons/sources; snapshotted at run-start, not rebuilt mid-run.
     """
-    state = {"bbox": tuple(web_bbox) if web_bbox else None, "masks": None, "logged": False}
+    state = {"bbox": tuple(web_bbox) if web_bbox else None, "masks": None, "logged": False,
+             "skip_logged": False}
 
     def _source():
         frame, reg = capture.grab_with_region(region)
-        if state["masks"] is None and auto_crop:  # find_web_bbox once, then cached (bbox + masks)
+        # park guard: when a level transition outlasts advance_s, dbd re-centers the cursor onto the
+        # new center node, undoing do_auto_spend's park and leaving its tooltip over the fresh web.
+        # if the cursor drifted off the park spot, re-park, let the tooltip fade, and re-grab a clean
+        # frame. also covers a run started with the cursor on a node.
+        h, w = frame.shape[:2]
+        px, py = capture.frame_to_screen(
+            int(Resolution.PARK_XY[0] * w), int(Resolution.PARK_XY[1] * h), reg,
+        )
+        cx, cy = input_control.get_position()
+        if abs(cx - px) > PARK_TOL_PX or abs(cy - py) > PARK_TOL_PX:
+            input_control.move_to(px, py)
+            time.sleep(PARK_FADE_S)
+            frame, reg = capture.grab_with_region(region)
+        if state["masks"] is None and auto_crop:  # anchor ocr each scan until it reads, then cached
             found, masks = ocr.find_web_bbox(frame, pad_frac=crop_pad_frac)
-            if state["bbox"] is None:            # keep a preset web_bbox but still take the masks
-                state["bbox"] = found
-            state["masks"] = masks
+            if found is not None:
+                if state["bbox"] is None:        # keep a preset web_bbox but still take the masks
+                    state["bbox"] = found
+                state["masks"] = masks
+            elif state["bbox"] is None:
+                # no anchors and no preset crop: bloodweb probably not on screen (menu, transition,
+                # early start). detecting on the full frame is how ui buttons became fake clicked
+                # nodes, and the old code CACHED this first failure so one bad frame poisoned the run.
+                # skip the scan, return no nodes, retry the anchors next scan.
+                if debug and not state["skip_logged"]:
+                    print("[crop] anchors not found (bloodweb not visible?), "
+                          "skipping scans until they read")
+                    state["skip_logged"] = True
+                return frame, reg, []
+            # preset bbox but flaky anchors this frame, so crop with the preset now,
+            # and retry the masks next scan rather than caching a partial or empty mask list.
+        state["skip_logged"] = False
         bbox, masks = state["bbox"], state["masks"] or []
         if not state["logged"]:                  # log the crop decision once
             if debug:
                 print(f"[crop] web bbox {bbox}" if bbox
-                      else "[crop] no anchors found, using full frame (strays possible)")
+                      else "[crop] auto-crop off, using full frame (strays possible)")
                 if masks:
                     print(f"[crop] masking {len(masks)} ui region(s) (perk row / spend button)")
             state["logged"] = True
@@ -234,11 +315,17 @@ def live_source(
         # detect's own debug stays off: it pops blocking matplotlib windows, fatal in a live loop.
         dets = detect.detect(
             sub, rows=rows, ncc_templates=ncc_templates, matcher=matcher,
-            debug=False, thresh_method=thresh_method, use_hough=use_hough,
+            debug=False, thresh_method=thresh_method, use_hough=use_hough, row_pool=row_pool,
         )
         for d in dets:
             d["x"] += x0
             d["y"] += y0                         # crop-local -> full-frame, so clicks + ocr line up
+        if masks:
+            # a blanked mask rect binarizes into a solid blob that becomes a fake circle;
+            # drop any detection whose center landed in a masked ui region (perk row / spend button).
+            dets = [d for d in dets
+                    if not any(mx0 <= d["x"] <= mx1 and my0 <= d["y"] <= my1
+                               for mx0, my0, mx1, my1 in masks)]
         nodes = [Node.from_detection(d) for d in dets]
         return frame, reg, nodes
     return _source
@@ -258,7 +345,9 @@ def _log_scan_summary(nodes):
     ocr so much' that the per-node [ocr] lines then itemize."""
     real = [n for n in nodes if not n.is_center]
     ncenter = len(nodes) - len(real)
-    need = [n for n in real if n.needs_resolution]
+    pooled = [n for n in real if n.pooled_out]     # outside the priority pool: unknown, skipped
+    scored = [n for n in real if not n.pooled_out]
+    need = [n for n in scored if n.needs_resolution]
     tally = {}
     for n in need:
         for r in n.resolution_reasons:
@@ -266,20 +355,22 @@ def _log_scan_summary(nodes):
             tally[head] = tally.get(head, 0) + 1
     summary = ", ".join(f"{k} x{v}" for k, v in
                         sorted(tally.items(), key=lambda kv: -kv[1])) or "none"
+    pooled_str = f", {len(pooled)} pooled-out" if pooled else ""
     print(f"[scan] {len(real)} nodes (+{ncenter} center): "
-          f"{len(real) - len(need)} trusted, {len(need)} -> ocr | reasons: {summary}")
+          f"{len(scored) - len(need)} trusted, {len(need)} -> ocr{pooled_str} | reasons: {summary}")
 
 
-def resolve_uncertain(nodes, frame, region, rows, debug=False, hover_delay_s=None):
+def resolve_uncertain(nodes, frame, region, rows, debug=False, hover_delay_s=None,
+                      weak_match_fallback=True):
     """settle identity for nodes flagged needs_resolution via an ocr hover scan.
-    a node is trusted when its observed reads and matched icon agree and the match is confident.
+    a node is trusted when its observed reads and matched icon agree and the match is confident,
     otherwise we hover it and read the name tooltip rather than guess.
+    when weak_match_fallback (the default), a hover that reads no tooltip falls back to the weak icon
+    match for item rules (ocr_failed set) rather than skipping the node.
     live only, so skip entirely when frame is None (the sim path, nodes stay as detected).
-    hover_delay_s is how long to wait after hovering for dbd's tooltip to fade in before the read;
-    None uses ocr's default. raise it (from the settings ui) if reads fail because the tooltip
-    hadn't appeared yet.
-    when debug, log each routed node's reason and the ocr outcome, so a live run shows exactly
-    why and how often it falls back to ocr (see also _log_scan_summary).
+    hover_delay_s is the tooltip fade-in wait before the read; None uses ocr's default (raise it from
+    the settings ui if reads fail because the tooltip hadn't appeared yet).
+    when debug, log each routed node's reason and the ocr outcome (see also _log_scan_summary).
     """
     if frame is None:
         return nodes
@@ -291,9 +382,14 @@ def resolve_uncertain(nodes, frame, region, rows, debug=False, hover_delay_s=Non
         before = n.name
         # mutates n, may set resolved_by='ocr'
         ocr.find_node_tooltip(n, frame, region, rows, hover_delay_s=hover_delay_s)
+        if n.resolved_by != 'ocr' and weak_match_fallback:
+            # ocr fell through: mark it so item rules trust the weak icon match rather than skip
+            n.ocr_failed = True
         if debug:
             if n.resolved_by == 'ocr':
                 print(f"[ocr]   read {before!r} -> {n.name!r}")
+            elif n.ocr_failed:
+                print(f"[ocr]   no tooltip read, falling back to icon match {n.name!r}")
             else:
                 print(f"[ocr]   no tooltip read, left as {n.name!r} (item rules will skip it)")
     return nodes
@@ -301,16 +397,42 @@ def resolve_uncertain(nodes, frame, region, rows, debug=False, hover_delay_s=Non
 
 def choose_next(nodes, config):
     """return the highest-priority Node to buy, or None for center auto-spend.
-    walks the tiers high to low and, for the first tier with any matching node, returns a random
-    choice across every node matching any rule in that tier (random within a tier by design,
-    inner/cheaper nodes tend to be lower quality). returns one node, the loop rescans after each
-    buy; the don't-repick guard lives in the loop so this stays a pure function of the node list.
+    walks the tiers high to low and stops at the first tier with any matching node:
+      normal tier   pick at random across every node matching any rule in the tier (the default,
+                    inner/cheaper nodes tend to be lower quality so no order is imposed).
+      ordered tier  prefer nodes matching the earliest (topmost) rule, i.e. the first rule with any
+                    match wins, breaking ties at random within that one rule (within-tier ordering).
+    returns one node, the loop rescans after each buy; the don't-repick guard lives in the loop so
+    this stays effectively a pure function of the node list. it does tag the chosen node with its
+    pick provenance (pick_tier / pick_rank / pick_ordered) so the loop can log why it won.
     """
-    for tier in config.get("priorities", []):
-        hits = [n for n in nodes if any(n.matches(rule) for rule in tier)]
-        if hits:
-            return random.choice(hits)
+    for ti, tier in enumerate(config.get("priorities", [])):
+        rules = tier_rules(tier)
+        hits = [n for n in nodes if any(n.matches(rule) for rule in rules)]
+        if not hits:
+            continue
+        if tier_is_ordered(tier):
+            for rank, rule in enumerate(rules, start=1):
+                rule_hits = [n for n in hits if n.matches(rule)]
+                if rule_hits:
+                    choice = random.choice(rule_hits)
+                    choice.pick_tier, choice.pick_rank, choice.pick_ordered = ti + 1, rank, True
+                    return choice
+        choice = random.choice(hits)
+        choice.pick_tier, choice.pick_rank, choice.pick_ordered = ti + 1, None, False
+        return choice
     return None
+
+
+def _pick_note(node):
+    """compact pick provenance for the buy/dry-run log: which tier the pick came from and, in an
+    ordered tier, the within-tier rank of the matched rule. empty when unset (e.g. a sim node not
+    routed through choose_next), so the log line is unchanged where there's nothing to add."""
+    if node.pick_tier is None:
+        return ""
+    if node.pick_ordered:
+        return f" [tier {node.pick_tier} ordered, rank #{node.pick_rank}]"
+    return f" [tier {node.pick_tier} random]"
 
 
 def do_auto_spend(nodes, frame, region, hold_s=0.05, advance_s=ADVANCE_S):
@@ -334,7 +456,35 @@ def do_auto_spend(nodes, frame, region, hold_s=0.05, advance_s=ADVANCE_S):
 
     sx, sy = capture.frame_to_screen(fx, fy, region)
     input_control.click_node(sx, sy, hold_s=hold_s)
-    time.sleep(advance_s)
+    time.sleep(advance_s)   # let the fill + level transition play out
+
+    # park off-web (PARK_XY) AFTER the transition, not before: dbd re-centers the cursor onto the
+    # center node while the level loads, so a pre-wait park gets undone (leaving the auto-spend
+    # tooltip over the fresh web). parking once settled makes it stick, and the loop's settle_s wait
+    # lets the tooltip fade before the next scan. same PARK_XY spot as the ocr hover park.
+    if frame is not None:
+        h, w = frame.shape[:2]
+        px_f, py_f = Resolution.PARK_XY
+        park_x, park_y = capture.frame_to_screen(int(px_f * w), int(py_f * h), region)
+        input_control.move_to(park_x, park_y)
+
+
+SCAN_KEEP = 8   # debug scan pairs kept on disk before the oldest are pruned
+
+
+def _save_scan_frames(frame, annotated):
+    """persist each debug scan (raw grab + annotated detections) under the debug dir's scans/
+    folder, so a live detection miss can be reproduced offline by rerunning find_circles on the
+    exact raw frame instead of guessing from the log. keeps the newest SCAN_KEEP pairs."""
+    import cv2   # spender itself is otherwise cv2-free, keep it a local dep of this debug helper
+    d = paths.debug_dir() / "scans"
+    d.mkdir(parents=True, exist_ok=True)
+    tag = time.strftime("%H%M%S")
+    cv2.imwrite(str(d / f"scan-{tag}-raw.png"), frame)
+    cv2.imwrite(str(d / f"scan-{tag}-det.png"), annotated)
+    for old in sorted(d.glob("scan-*-raw.png"))[:-SCAN_KEEP]:
+        old.unlink(missing_ok=True)
+        (d / old.name.replace("-raw", "-det")).unlink(missing_ok=True)
 
 
 def _interruptible_sleep(switch, seconds):
@@ -393,20 +543,22 @@ def _open_run_log():
         return None
 
 
-def run(source, config, switch, rows, click=True, debug=False):
+def run(source, config, switch, rows, click=True, debug=False, frame_sink=None):
     """the decide loop: one scan per level, then click our priorities off that single snapshot
     before handing the rest to dbd's center auto-spend and advancing.
     dry-run (logs intent, sends no input) whenever click=False; main folds the config dry_run
     default plus the --dry-run / --live / --sim flags into that one flag.
     debug adds the per-scan ocr summary + per-node/per-buy provenance logging (see --debug).
+    frame_sink, if given, is called each scan (only while debug and a live frame exist) with an
+    annotated bgr frame (detect.draw_detections), so a caller like the ui's debug view can show
+    what the loop is seeing without popping a blocking window.
 
     one scan per level (not per buy): dbd auto-buys the cheapest path to any node, so every node is
-    clickable now and node positions stay put until the level advances. we walk our priorities high
-    to low off the snapshot, clicking each and recording its spot in a per-web 'spent' list so the
-    next pick skips it (a node dbd already consumed as part of a path just clicks a harmless no-op).
-    that's far fewer detect() calls than re-capturing per buy and avoids detecting the web
-    mid-animation; the trade-off is that a node the single scan misses won't be prioritized, but
-    the center auto-spend at level end still buys it.
+    clickable now and positions stay put until the level advances. we walk priorities high to low off
+    the snapshot, clicking each and recording its spot in a per-web 'spent' list so the next pick
+    skips it. far fewer detect() calls than re-capturing per buy, and avoids detecting mid-animation;
+    the trade-off is a node the single scan misses won't be prioritized, but the center auto-spend at
+    level end still buys it.
 
     runs until switch.killed; while not switch.running (idle or paused) it just polls. a stateful
     source may expose consume(node)/advance() to be told of buys and level changes (the sim uses
@@ -437,6 +589,13 @@ def run(source, config, switch, rows, click=True, debug=False):
         # one capture + detect for the whole level.
         frame, region, nodes = source()
 
+        # nothing detected (live: anchors unread / bloodweb not visible). do NOT fall through: with
+        # zero nodes choose_next returns None and the auto-spend fallback would blind-click the frame
+        # center on whatever screen is up. wait and rescan instead.
+        if not nodes:
+            _interruptible_sleep(switch, settle_s)
+            continue
+
         # optional stop: quit once the live bloodpoint total falls to the configured floor.
         # checked per level here (per scan), so a stop can lag the floor by up to one level's spend.
         if bp_floor and frame is not None:
@@ -447,7 +606,13 @@ def run(source, config, switch, rows, click=True, debug=False):
 
         if debug:
             _log_scan_summary(nodes)
-        nodes = resolve_uncertain(nodes, frame, region, rows, debug=debug, hover_delay_s=hover_s)
+        nodes = resolve_uncertain(nodes, frame, region, rows, debug=debug, hover_delay_s=hover_s,
+                                  weak_match_fallback=config.get("weak_match_fallback", True))
+        if debug and frame is not None:
+            annotated = detect.draw_detections(frame, nodes)
+            if frame_sink is not None:
+                frame_sink(annotated)
+            _save_scan_frames(frame, annotated)
 
         # click every priority match on this snapshot, high to low, skipping spots already clicked.
         spent = []
@@ -458,18 +623,19 @@ def run(source, config, switch, rows, click=True, debug=False):
                 break                     # no priorities left on this web
             if switch.killed:             # panic key landed mid-pick, don't click
                 break
-            # margin + runner-up on the buy line are the followup lever: a confident buy with a
-            # tiny margin vs a plausible runner-up flags where the relaxed margin gate may mispick.
+            # margin + runner-up on the buy line are the followup lever;
+            # a confident buy with a tiny margin vs a plausible runner-up flags a possible mispick.
             runner = f" vs {choice.runner_up!r}" if (debug and choice.runner_up) else ""
             if dry_run:
                 print(f"[dry-run] buy {choice.name!r} "
                       f"({choice.effective_category}/{choice.rarity}) via {choice.resolved_by} "
-                      f"s={choice.score:.2f} m={choice.margin:.3f}{runner} @ {choice.x},{choice.y}")
+                      f"s={choice.score:.2f} m={choice.margin:.3f}{runner} "
+                      f"@ {choice.x},{choice.y}{_pick_note(choice)}")
             else:
                 if debug:
                     print(f"[buy] {choice.name!r} ({choice.effective_category}/{choice.rarity}) "
                           f"via {choice.resolved_by} s={choice.score:.2f} m={choice.margin:.3f}"
-                          f"{runner} @ {choice.x},{choice.y}")
+                          f"{runner} @ {choice.x},{choice.y}{_pick_note(choice)}")
                 sx, sy = capture.frame_to_screen(choice.x, choice.y, region)
                 input_control.click_node(sx, sy)
             spent.append((choice.x, choice.y))   # remember the spot so we don't re-pick it
@@ -509,7 +675,7 @@ def main():
                     help="actually click in-game, overriding the config dry_run safety default")
     ap.add_argument("--config", default=None, help="path to priority.json (default: config/priority.json)")
     ap.add_argument("--matcher", default=None,
-                    help="detect matcher: ncc | ncc_masked | phash (overrides config; default ncc)")
+                    help="detect matcher: cnn | ncc | ncc_masked | phash (overrides config; default cnn)")
     ap.add_argument("--debug", action="store_true",
                     help="verbose loop logging: per-scan ocr summary, why each node routes to ocr, "
                          "the ocr read result, and each buy's provenance (match vs ocr)")
@@ -521,7 +687,7 @@ def main():
     rows, _ = detect.load_index()
 
     # detect knobs come from config so the settings ui owns them; --matcher / --debug still override.
-    matcher = args.matcher or config.get("matcher", "ncc")
+    matcher = args.matcher or config.get("matcher", "cnn")
     debug = args.debug or config.get("debug", False)
     thresh_method = config.get("thresh_method", "adaptive_gaussian")
     use_hough = config.get("node_finder", "contours") == "hough"
@@ -550,12 +716,22 @@ def main():
         source = sim_source(rows, seed=0, low_conf_frac=0.2, discrepancy_frac=0.1)
     else:
         ncc_templates = detect.load_ncc_templates(rows) if matcher.startswith("ncc") else None
+        # narrow the match library to the priority list's icons/sources, snapshotted here (not
+        # rebuilt mid-run). None = no narrowing (compare against the whole library).
+        row_pool = build_pool_mask(
+            rows, config.get("priorities", []),
+            inferred=config.get("pool_inferred", True),
+            exclusive=config.get("pool_exclusive", False),
+        )
+        if row_pool is not None:
+            print(f"pool: matching against {sum(row_pool)}/{len(rows)} library icons "
+                  f"({'priority-only' if config.get('pool_exclusive') else 'priority-inferred'})")
         source = live_source(
             rows, ncc_templates, matcher=matcher, thresh_method=thresh_method, use_hough=use_hough,
             auto_crop=config.get("auto_crop", True) and not args.no_crop,
             web_bbox=config.get("web_bbox"),
             crop_pad_frac=config.get("crop_pad_frac", ocr.CROP_PAD_FRAC),
-            debug=debug,
+            debug=debug, row_pool=row_pool,
         )
     run(source, config, switch, rows, click=not dry_run, debug=debug)
 

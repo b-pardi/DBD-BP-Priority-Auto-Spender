@@ -29,19 +29,28 @@ present it clicks the center auto-spend to finish the level and move on.
 
 #### Alpha (ready for small test group)
 - [x] make robust across resolutions
-- [ ] detect: switch to custom trained CNN
-    - [ ] data labelling util
-    - [ ] train model
-    - [ ] integrate model
-- [ ] node detection/extraction v2
+- [x] detect: switch to custom trained CNN
+    - [x] data labelling util
+    - [x] synthetic data data generation
+    - [x] train/tune/integrate model
+- [x] node detection/extraction v2
 - [ ] bloodweb prestige screen detection
 - [x] auto determine bbox for bloodweb frame crop.
 - [x] fix non-breaking UI bugs
 - [ ] add within tier priority selection
+- [ ] core functionality test code on fixtures
+- [ ] flush out documentation
+    - [ ] add instructions tab to ui
+- [ ] update default settings and setup profile templates
+- [ ] bundle an exe
 
 #### Beta (some smart nice to have features)
 - [ ] Entity aware node selection
 - [ ] bloodweb prestige/level spending cap
+- [ ] bloodpoint spending limit
+- [ ] validate abilities in other bloodweb menu backgrounds
+- [ ] implement the synthetic node background images into the scraper
+- [ ] update ui button to auto update the software in the ui
 - [ ] auto pause when detecting bloodweb no longer visible
 - [ ] ui drag and drop priority elements
 
@@ -106,10 +115,41 @@ python -m ui
 
 ### Detecting nodes on screen in the bloodweb
 
+- Grabs the screen, then auto crops down to just the bloodweb using a couple bits of OCR'd anchor text so UI buttons and other screen junk can't get mistaken for nodes.
+- Binarizes the crop and finds node shaped blobs, then figures out each one's rarity from the color of its disk and its item/perk/addon type from the socket outline.
+- Turns out every bloodweb is secretly the same fixed 30 slot ring layout no matter what's in it, so detection now fits that lattice to the frame and snaps candidates onto it. This single fact would have saved an embarrassing number of weekends fighting almost circular blobs that were actually just shadows.
+- The center node gets found separately by its red glow, since it's the auto spend fallback and never something we buy on purpose.
+
 ### Matching nodes with wiki references 
+
+- Crops out just the little icon glyph sitting inside each node, blurry JPEG artifacts and all.
+- The real matcher is a small CNN that learns to squish that ugly extracted glyph and the clean wiki sprite into the same neighborhood of embedding space, then it's just nearest neighbor lookup against a cached bank of every icon's embedding.
+- Classical approaches (pHash, plain NCC, masked NCC) all got tried first and all capped out around the mid 50s to low 60s percent on real screenshots, which is a nice way of saying they weren't good enough and something smarter was unavoidable.
+- Training that CNN needed a pile of labeled examples nobody was going to hand label, so there's a synthetic glyph generator that renders fake nodes and puts them through the exact same crop and degrade pipeline the live detector uses, just to manufacture something realistic enough to learn from. Genuinely one of the more soul crushing parts of this whole project.
+- When the matcher still isn't confident enough, it falls back to hovering the node and OCR'ing the tooltip that pops up. Slower, but basically never wrong.
 
 #### Getting the wiki references
 
+- Scrapes deadbydaylight.wiki.gg for every icon plus its name, rarity, category, and description.
+- Also works out whether an icon is currently obtainable and whether it belongs to the Survivor or Killer side, so matching can skip comparing against icons that could never show up in the web you're actually looking at.
+- Rerun it after a content patch and the whole library just refreshes itself, no manual relabeling required.
+
 ### Priority Selection
 
+- You write out tiers of rules in a JSON config, from specific items at a given rarity down to whole categories like "any offering".
+- Each scan walks the list top to bottom and buys the first match it finds among the detected nodes, one buy per scan since DBD auto pathfinds to whatever you click anyway.
+- Once nothing on the list is present anymore it just hits the center auto spend and lets the level finish itself out.
+
 ### Screen Capturing / Input Control
+
+- MSS grabs the frames, mostly because it's a lot faster than PIL on Windows and speed matters when you're polling a game window.
+- pydirectinput drives the mouse so the game sees ordinary input rather than something obviously synthetic.
+- The cursor gets parked off in a corner between actions so it isn't just sitting on a node accidentally triggering a tooltip every time a scan runs.
+- A global hotkey kill switch cuts everything immediately, because sooner or later something will misbehave and you'll want a way out that doesn't involve alt tabbing in a panic.
+
+### Program Interface
+
+idk nothing special here it's a customtkinter python ui that I couldn't be fucked to make so claude did most and I just fixed its stuff.
+
+- Lets you build and reorder your priority tiers, tune all the detection and timing knobs, and pick a matcher without touching the JSON by hand.
+- A debug screen shows you what the detector's actually seeing frame by frame, with a zoom and a save button for whenever it inevitably sees something wrong and you need to know why.

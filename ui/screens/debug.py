@@ -13,6 +13,7 @@ unrelated files, since in dev these dirs are the repo's data/ and .tmp/.
 import os
 import queue
 import threading
+import time
 
 import customtkinter as ctk
 import cv2
@@ -23,6 +24,7 @@ from src import paths, scraper
 from .. import theme
 
 IMG_MAX = (900, 680)  # cap the rendered frame so a 3440x1440 grab fits the panel
+ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 25, 400, 25  # percent, native-resolution zoom range
 
 
 class DebugScreen(ctk.CTkFrame):
@@ -33,6 +35,8 @@ class DebugScreen(ctk.CTkFrame):
         self._log_q = queue.Queue()
         self._ctk_img = None       # keep a ref so the CTkImage isn't garbage-collected
         self._scraping = False
+        self._last_frame = None    # newest raw bgr frame, kept full-res for zoom/save
+        self._zoom_pct = 100       # 100 = fit-to-panel; else native-resolution percent
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -56,13 +60,31 @@ class DebugScreen(ctk.CTkFrame):
     def _build_image_panel(self):
         left = ctk.CTkFrame(self)
         left.grid(row=0, column=0, sticky="nsew", padx=theme.PAD, pady=theme.PAD)
-        left.grid_rowconfigure(1, weight=1)
+        left.grid_rowconfigure(2, weight=1)
         left.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(left, text="Detector view", font=theme.FONT_TITLE).grid(
             row=0, column=0, sticky="w", padx=theme.PAD, pady=theme.PAD)
+
+        toolbar = ctk.CTkFrame(left, fg_color="transparent")
+        toolbar.grid(row=1, column=0, sticky="ew", padx=theme.PAD, pady=(0, theme.PAD))
+        ctk.CTkButton(toolbar, text="-", width=32, command=self._zoom_out).pack(side="left")
+        self.zoom_label = ctk.CTkLabel(toolbar, text="Fit", font=theme.FONT_SMALL, width=48)
+        self.zoom_label.pack(side="left", padx=4)
+        ctk.CTkButton(toolbar, text="+", width=32, command=self._zoom_in).pack(side="left")
+        ctk.CTkButton(toolbar, text="Fit", width=48, command=self._zoom_reset).pack(
+            side="left", padx=(4, 0))
+        ctk.CTkButton(toolbar, text="Save frame", command=self._save_frame).pack(
+            side="right")
+
+        self.image_viewport = ctk.CTkScrollableFrame(left)
+        self.image_viewport.grid(row=2, column=0, sticky="nsew", padx=theme.PAD, pady=(0, theme.PAD))
         self.image_label = ctk.CTkLabel(
-            left, text="(no frame yet — start a run with debugging on)", font=theme.FONT_BODY)
-        self.image_label.grid(row=1, column=0, sticky="nsew", padx=theme.PAD, pady=theme.PAD)
+            self.image_viewport, text="(no frame yet — start a run with debugging on)",
+            font=theme.FONT_BODY)
+        self.image_label.pack()
+        # ctrl+wheel (or plain wheel) over the frame zooms in/out instead of scrolling.
+        self.image_label.bind("<MouseWheel>", self._on_mousewheel)
+        self.image_viewport.bind("<MouseWheel>", self._on_mousewheel)
 
     def _build_maintenance(self):
         right = ctk.CTkFrame(self, width=340)
@@ -125,12 +147,52 @@ class DebugScreen(ctk.CTkFrame):
         self.logbox.insert("end", line + "\n")
         self.logbox.see("end")
 
-    def _render_frame(self, bgr):
+    def _render_frame(self, bgr, keep=True):
+        """render bgr at the current zoom. keep=True (a fresh frame off the queue) also stashes
+        it full-res as self._last_frame, so zoom/save can re-render or write it without waiting
+        on the next detector tick."""
+        if keep:
+            self._last_frame = bgr
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
-        pil.thumbnail(IMG_MAX, Image.LANCZOS)
+        if self._zoom_pct == 100:
+            pil.thumbnail(IMG_MAX, Image.LANCZOS)  # "fit" view: shrink to the panel, never upscale
+        else:
+            w, h = pil.size
+            scale = self._zoom_pct / 100
+            pil = pil.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
         self._ctk_img = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
         self.image_label.configure(image=self._ctk_img, text="")
+
+    # zoom controls
+    def _set_zoom(self, pct):
+        self._zoom_pct = max(ZOOM_MIN, min(ZOOM_MAX, pct))
+        self.zoom_label.configure(text="Fit" if self._zoom_pct == 100 else f"{self._zoom_pct}%")
+        if self._last_frame is not None:
+            self._render_frame(self._last_frame, keep=False)
+
+    def _zoom_in(self):
+        self._set_zoom(self._zoom_pct + ZOOM_STEP)
+
+    def _zoom_out(self):
+        self._set_zoom(self._zoom_pct - ZOOM_STEP)
+
+    def _zoom_reset(self):
+        self._set_zoom(100)
+
+    def _on_mousewheel(self, event):
+        self._zoom_in() if event.delta > 0 else self._zoom_out()
+        return "break"  # swallow it so the scrollable frame doesn't also scroll on the same tick
+
+    def _save_frame(self):
+        if self._last_frame is None:
+            self._append_log("no frame to save yet")
+            return
+        out_dir = paths.debug_dir()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        out_path = out_dir / f"frame_{time.strftime('%Y%m%d_%H%M%S')}.png"
+        cv2.imwrite(str(out_path), self._last_frame)
+        self._append_log(f"saved frame: {out_path}")
 
     # maintenance actions
     def _open(self, path):

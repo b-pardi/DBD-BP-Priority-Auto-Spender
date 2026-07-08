@@ -39,11 +39,12 @@ class Library:
         (folded like the detector via node.normalize_name), category exact, rarity exact with a
         'none' bucket for null-rarity rows (perks/powers/visceral).
 
-        role ('all'|'killer'|'survivor') filters by who plays the glyph. only items (survivor),
-        powers (killer), and perks (per the wiki role categories) carry a role; add-ons and
-        offerings have none on the wiki (and most offerings suit either side), so their null role
-        passes both filters rather than being wrongly hidden. rows from an index predating the role
-        scrape are all null and likewise unaffected.
+        role ('all'|'killer'|'survivor') filters by who plays the glyph. items (survivor), powers
+        (killer), and perks (per the wiki role categories) carry a role; add-ons instead carry a
+        `side` (whose power/item they belong to), so we fall back to that when role is absent.
+        offerings have neither on the wiki (and most suit either side), so they pass both filters
+        rather than being wrongly hidden. rows from an index predating these scrapes are all null
+        and likewise unaffected.
 
         show_unavailable=False (the default) hides glyphs you can't buy in a current bloodweb:
         'event' (past-event skins) and 'unavailable' (killer powers, retired offerings). rows from
@@ -56,7 +57,7 @@ class Library:
             if category != "all" and r.get("category") != category:
                 continue
             if role != "all":
-                rr = r.get("role")
+                rr = r.get("role") or r.get("side")
                 if rr is not None and rr != role:
                     continue
             if rarity == "none":

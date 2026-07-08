@@ -1,19 +1,16 @@
 """semantic node model for the priority engine.
 
-detect() emits raw per-node dicts full of detection internals (the glyph image, the
-phash/ncc score, socket geometry). the priority + spend algorithm only cares about
-semantic attributes: where to click, what the node IS, and how much to trust that read.
-Node is that semantic view, built once at the boundary via from_detection, so the rest
-of the algorithm never touches detection dicts (and the offline simulator can build the
-exact same objects without a frame).
+detect() emits raw per-node dicts of detection internals (glyph image, phash/ncc score,
+socket geometry); Node is the semantic view the spend algorithm wants (where to click, what
+the node is, how much to trust that read), built once at the boundary via from_detection so
+the rest of the algorithm never touches detection dicts (and the sim builds the same objects
+without a frame).
 
-Node also owns the observed-vs-matched reconciliation. rarity comes from the disk color
-(authoritative live read) and category from the matched icon (the only thing that can
-split item from addon, since both are square sockets). when those two sources disagree,
-or the icon match is weak, the node is flagged needs_resolution so the loop can fall back
-to an ocr tooltip-hover scan to settle identity (see ocr.find_node_tooltip). that fallback
-replaces a pure confidence gate: both weak matches and observed/matched misalignment get
-routed to ocr instead of being guessed at.
+Node also owns observed-vs-matched reconciliation. rarity comes from the disk color (the
+authoritative live read), category from the matched icon (the only thing that splits item
+from addon, both square sockets). when the two disagree or the match is weak, the node is
+flagged needs_resolution so the loop falls back to an ocr tooltip-hover scan to settle
+identity (see ocr.find_node_tooltip), instead of guessing behind a plain confidence gate.
 """
 
 from dataclasses import dataclass, field
@@ -27,17 +24,37 @@ SHAPE_CATEGORIES = {
     'hexagon': ('offering',),
 }
 
-# confidence thresholds per matcher, score direction differs (see detect.MATCHERS).
-# ncc is cosine (higher=better), phash is hamming distance (lower=better).
-# placeholders from the matcher eval (ncc real conf ~0.5-0.84), tune against the fixtures.
+# confidence thresholds per matcher; score direction differs (see detect.MATCHERS).
+# ncc/cnn are cosine (higher=better), phash is hamming distance (lower=better).
+# ncc gate is a placeholder from the matcher eval (real conf ~0.5-0.84), tune vs fixtures.
 NCC_CONF_MIN = 0.45
+# cnn cosine gate calibrated on the real independent labels (eval_matchers cnneval + sweep): 0.65 is
+# ~80% coverage at ~96% precision, so confident cnn matches skip ocr and the near-dup slippers
+# (wornOutTools, skeletonKey) fall below it and route to ocr.
+CNN_CONF_MIN = 0.65
 PHASH_MAX_HAM = 10
-# runner-up MARGIN floors: retained for the followup but no longer gate `confident` (2026-06-29).
-# against big same-shape pools of near-duplicate icons a correct top match very often has a tiny
-# margin, so gating on it routed most good matches to ocr for nothing. score alone gates now; the
-# margin stays logged (see runner_up) as the lever for the later matching-quality work.
+# runner-up MARGIN floors: kept for the followup but no longer gate `confident` (2026-06-29). against
+# big same-shape pools a correct top match often has a tiny margin, so gating on it routed good
+# matches to ocr for nothing; score alone gates now, margin stays logged (see runner_up) as a lever.
 NCC_MARGIN_MIN = 0.03
 PHASH_MARGIN_MIN = 2
+
+
+def tier_rules(tier):
+    """the rule dicts of one priority tier, tolerating either config shape.
+    canonically a tier is {"rules": [...], "ordered": bool}, but an old/migrated/hand-edited file may
+    store a bare list of rules; both read the same here so the engine needn't care which it got."""
+    if isinstance(tier, dict):
+        return tier.get("rules") or []
+    if isinstance(tier, list):
+        return tier
+    return []
+
+
+def tier_is_ordered(tier):
+    """is this tier in within-tier ordered mode (prefer the earliest matching rule) rather than the
+    default random pick? a bare-list tier is always unordered (the pre-feature behavior)."""
+    return bool(tier.get("ordered")) if isinstance(tier, dict) else False
 
 
 def normalize_name(s):
@@ -76,14 +93,14 @@ def dedup_index_rows(rows, near_ham=10):
 
     two passes, both scoped per category so a chance cross-category hash collision isn't merged:
       1. exact phash duplicates (the wiki serves a byte-identical sprite under several filenames).
-      2. near-duplicate swapped-word aliases: same category, same name word-set, and phashes within
-         near_ham bits. the wiki uploads one sprite under both word orders (sportFlashlight vs
-         flashlightSport), which the exact pass misses because the two uploads aren't byte-identical
-         (hamming ~2-6, not 0). near_ham=10 sits above that real-dup spread and well below distinct
-         same-word-set sprites (e.g. K35_Teleport vs Teleport_K35 at ~28), so only true aliases merge.
+      2. near-dup swapped-word aliases: same category, same name word-set, phashes within near_ham
+         bits. the wiki uploads one sprite under both word orders (sportFlashlight vs flashlightSport),
+         which pass 1 misses since the two uploads aren't byte-identical (hamming ~2-6). near_ham=10
+         sits above that real-dup spread and below distinct same-word-set sprites (~28), so only true
+         aliases merge.
 
-    keeps the richest row per group (rarity known, then a description present), which is exactly the
-    canonical name; the bare alias (null rarity, empty desc) is the one dropped. order preserved."""
+    keeps the richest row per group (rarity known, then desc present), i.e. the canonical name; the
+    bare alias (null rarity, empty desc) is dropped. order preserved."""
     drop = set()
     # pass 1: exact phash, any name
     by_hash = {}
@@ -125,10 +142,12 @@ class Node:
     socket_shape: str      # 'square' | 'rhombus' | 'hexagon'
 
     is_center: bool = False # center auto-spend node, found by red glow; never a buy target
+    pooled_out: bool = False # outside the priority match pool: read as unknown, never ocr'd or bought
 
     # matched-icon reads, from the library row the matcher picked.
     name: str = None       # matched icon display name
     match: dict = None     # raw library row {key,name,category,rarity,...} or None
+    matched_name: str = None  # matcher's own guess, frozen at detection (name gets ocr-overwritten on resolution; this stays the cnn/ncc read for debug)
     score: float = 0.0
     margin: float = 0.0
     matcher: str = 'ncc'
@@ -136,6 +155,13 @@ class Node:
 
     # provenance of the final identity, the loop sets this to 'ocr' after a hover scan.
     resolved_by: str = 'match'   # 'match' | 'ocr'
+    ocr_failed: bool = False      # loop set: hover attempted but read no tooltip, so item rules fall back to the weak icon match instead of skipping
+
+    # pick provenance, set by spender.choose_next on the returned node, never by detection;
+    # lets the loop log which tier won and, in an ordered tier, the within-tier rank of the rule.
+    pick_tier: int = None        # 1-based index of the tier this node was picked from
+    pick_rank: int = None        # 1-based within-tier rank of the rule it matched (ordered tiers)
+    pick_ordered: bool = False   # was that tier in ordered mode
 
     # detection internals, kept optional for debug/ocr only, never used by the algorithm.
     glyph_bgr: object = field(default=None, repr=False)
@@ -143,16 +169,18 @@ class Node:
     @classmethod
     def from_detection(cls, d):
         """adapt one detect() result dict into a Node.
-        detect()'s 'cat' key is the socket SHAPE, not a game category, so it maps to
-        socket_shape here (the real category is derived from the match)."""
+        detect()'s 'cat' key is the socket SHAPE not a game category, so it maps to socket_shape here
+        (the real category is derived from the match)."""
         m = d.get('match') or None
         return cls(
             x=int(d['x']), y=int(d['y']), r=int(d['r']),
             rarity=d['rar'],
             socket_shape=d['cat'],
             is_center=(d.get('kind') == 'center'),
+            pooled_out=bool(d.get('pooled_out', False)),
             name=(m.get('name') if m else None),
             match=m,
+            matched_name=(m.get('name') if m else None),
             score=float(d.get('score', 0.0)),
             margin=float(d.get('margin', 0.0)),
             matcher=d.get('matcher', 'ncc'),
@@ -180,12 +208,14 @@ class Node:
     def confident(self):
         """is the icon match strong enough to trust on its own?
         direction depends on the matcher (ncc higher=better, phash lower=better).
-        score-only gate: the runner-up margin was dropped here (see NCC_MARGIN_MIN note) because it
-        sent most correct-but-near-tie matches to ocr; margin stays logged as a followup signal."""
+        score-only gate: the runner-up margin was dropped (see NCC_MARGIN_MIN) since it sent most
+        correct-but-near-tie matches to ocr; margin stays logged as a followup signal."""
         if self.match is None:
             return False
         if self.matcher == 'phash':
             return self.score <= PHASH_MAX_HAM
+        if self.matcher == 'cnn':
+            return self.score >= CNN_CONF_MIN
         return self.score >= NCC_CONF_MIN  # ncc / ncc_masked
 
     @property
@@ -207,20 +237,23 @@ class Node:
 
     @property
     def resolution_reasons(self):
-        """the specific reasons this node would route to ocr, an empty list if it's trusted.
-        mirrors needs_resolution but spells out which check failed and with what values, so a
-        debug log can say WHY ocr fired (weak score, tiny margin, attr disagreement) instead of
-        just that it did. grouped: a weak match is one reason carrying its failing sub-conditions,
-        then category/rarity disagreement (only meaningful when there is a match to disagree with).
+        """the specific reasons this node would route to ocr, empty list if it's trusted.
+        mirrors needs_resolution but spells out which check failed and with what values, so a debug
+        log can say WHY ocr fired (weak score, attr disagreement) not just that it did.
+        a pooled-out node (outside the match pool) is deliberately unidentified, so it carries no
+        reasons: it reads as unknown and is skipped, never routed to ocr.
         """
+        if self.pooled_out:
+            return []
         reasons = []
         if not self.confident:
             if self.match is None:
                 reasons.append("no icon match")
             elif self.matcher == 'phash':
                 reasons.append(f"weak match (dist {self.score:.0f}>{PHASH_MAX_HAM})")
-            else:  # ncc / ncc_masked, higher cosine = better
-                reasons.append(f"weak match (score {self.score:.2f}<{NCC_CONF_MIN})")
+            else:  # ncc / ncc_masked / cnn, higher cosine = better
+                floor = CNN_CONF_MIN if self.matcher == 'cnn' else NCC_CONF_MIN
+                reasons.append(f"weak match (score {self.score:.2f}<{floor})")
         if self.match is not None:  # disagreement only means something against an actual match
             if not self.category_agrees:
                 reasons.append(f"category {self.matched_category!r} not valid for {self.socket_shape}")
@@ -231,9 +264,9 @@ class Node:
     @property
     def needs_resolution(self):
         """should the loop fall back to an ocr hover scan to settle identity?
-        true when the icon match is weak OR the observed and matched attrs disagree; see
-        resolution_reasons for the itemized why. this is the replacement for a plain confidence
-        gate: both routes go to ocr, not a guess."""
+        true when the match is weak OR the observed and matched attrs disagree (see
+        resolution_reasons for the itemized why). replaces a plain confidence gate: both routes go
+        to ocr, not a guess."""
         return bool(self.resolution_reasons)
 
     @property
@@ -264,6 +297,8 @@ class Node:
         """
         if self.is_center:
             return False # auto-spend node, the loop handles it, never a buy target
+        if self.pooled_out:
+            return False # outside the priority pool, left unidentified on purpose, never a target
 
         rarity = rule.get("rarity")
         if rarity is not None and rarity != self.effective_rarity:
@@ -271,8 +306,92 @@ class Node:
 
         if rule.get("type") == "item":
             if not (self.confident or self.resolved_by == "ocr"):
-                return False # must BE this icon, so demand a trustworthy read first
+                # item rules want a trustworthy read, but if we already hovered and ocr read nothing
+                # don't toss a correct-but-weak icon match: fall back to it (ocr_failed set post-hover).
+                if not (self.ocr_failed and self.match is not None):
+                    return False
             return normalize_name(self.name) == normalize_name(rule["name"])
         if rule.get("type") == "category":
             return self.effective_category == rule["category"]
         return False
+
+
+def _rule_row_indices(rows, rule):
+    """indices of the library rows a single priority rule names.
+    an item rule -> every row whose name folds to the rule's name (rarity/alias variants of the same
+    icon); a category rule -> every row in that category. used to seed both pool modes."""
+    if rule.get("type") == "item":
+        target = normalize_name(rule.get("name"))
+        return [i for i, r in enumerate(rows) if normalize_name(r.get("name")) == target]
+    if rule.get("type") == "category":
+        cat = rule.get("category")
+        return [i for i, r in enumerate(rows) if r.get("category") == cat]
+    return []
+
+
+def build_pool_mask(rows, priority_tiers, inferred=True, exclusive=False):
+    """which library rows the icon matcher may compare an on-screen glyph against, as a bool list
+    (len == len(rows)), or None for no restriction (compare against all, the old behavior).
+
+    two optional narrowings driven by the priority list, so we skip matching glyphs we'd never buy
+    (a survivor run needn't score every killer's add-ons, and vice versa):
+      exclusive: only the rows the priority list literally names (item rules pin their icon, category
+                 rules keep their whole category); the strictest, a subset of inferred.
+      inferred:  the union of each priority item's full bloodweb 'source' (a survivor item pulls in
+                 the whole survivor side; a killer add-on pulls in that killer's add-ons plus shared
+                 killer perks/offerings), so you drop other killers' add-ons but keep any real web.
+    exclusive wins when both are on (narrower). rows whose side/owner is unknown are kept (safe
+    superset: a little wasted compute beats dropping a node you might want). returns None when neither
+    narrowing is active, or the inferred pass finds no side signal (e.g. an offering-only list).
+
+    rows must be the same list/order detect matches against, so the mask lines up index-for-index.
+    """
+    if not (inferred or exclusive):
+        return None
+    n = len(rows)
+    rules = [rule for tier in priority_tiers for rule in tier_rules(tier)]
+
+    if exclusive:
+        mask = [False] * n
+        for rule in rules:
+            for i in _rule_row_indices(rows, rule):
+                mask[i] = True
+        return mask
+
+    # inferred: resolve the priority items to their source webs, then union those webs back in.
+    survivor_active = False           # any survivor-side item/perk in the list -> keep survivor side
+    killer_any = False                # any killer-side item in the list -> keep shared killer perks
+    killer_owners = set()             # specific killer powers named, to keep just their add-ons
+    for rule in rules:
+        if rule.get("type") != "item":
+            continue                  # category rules can't name a side; handled by cat union below
+        for i in _rule_row_indices(rows, rule):
+            r = rows[i]
+            if r.get("side") == "survivor":
+                survivor_active = True
+            elif r.get("side") == "killer":
+                killer_any = True
+                if r.get("category") == "addon" and r.get("owner"):
+                    killer_owners.add(r["owner"])
+    cat_rule_cats = {rule.get("category") for rule in rules if rule.get("type") == "category"}
+
+    if not (survivor_active or killer_any or killer_owners or cat_rule_cats):
+        return None                   # no usable signal -> don't restrict (safer than blanking)
+
+    mask = [False] * n
+    for i, r in enumerate(rows):
+        cat, side = r.get("category"), r.get("side")
+        if cat in cat_rule_cats:
+            keep = True               # a category rule keeps its whole category
+        elif side is None:
+            keep = True               # shared/unknown (offerings, undated add-ons): safe superset
+        elif side == "survivor":
+            keep = survivor_active
+        elif cat == "addon":          # killer add-on: only the specific killers named
+            keep = r.get("owner") in killer_owners
+        elif cat == "power":
+            keep = False              # powers are never bloodweb nodes
+        else:                         # killer perk (shared across every killer web)
+            keep = killer_any
+        mask[i] = keep
+    return mask

@@ -38,13 +38,17 @@ class RunScreen(ctk.CTkFrame):
         self.status = ctk.CTkLabel(bar, text="Idle", font=theme.FONT_BODY)
         self.status.pack(side="left", padx=theme.PAD)
 
-        self.sim_var = ctk.BooleanVar(value=True)   # safe default: offline simulator
+        self.sim_var = ctk.BooleanVar(value=False)  # off by default: real (non-simulator) run
         self.sim_chk = ctk.CTkCheckBox(bar, text="Use simulator", variable=self.sim_var,
                                        command=self._sync_toggles)
         self.sim_chk.pack(side="right", padx=theme.PAD)
-        self.dry_var = ctk.BooleanVar(value=bool((app.app_state.config or {}).get("dry_run", True)))
+        self.dry_var = ctk.BooleanVar(value=bool((app.app_state.config or {}).get("dry_run", False)))
         self.dry_chk = ctk.CTkCheckBox(bar, text="Dry run (no clicks)", variable=self.dry_var)
         self.dry_chk.pack(side="right", padx=theme.PAD)
+        self.debug_var = ctk.BooleanVar(value=bool((app.app_state.config or {}).get("debug", False)))
+        self.debug_chk = ctk.CTkCheckBox(bar, text="Debugging", variable=self.debug_var,
+                                         command=self._on_debug_toggle)
+        self.debug_chk.pack(side="right", padx=theme.PAD)
         self._sync_toggles()
 
         keys = app.app_state.config or {}
@@ -67,12 +71,26 @@ class RunScreen(ctk.CTkFrame):
         else:
             self.dry_chk.configure(state="normal")
 
+    def _on_debug_toggle(self):
+        # write through immediately (like Settings' toggle) so the Debug nav button appears right
+        # away, even mid-run, without having to leave this screen.
+        if self.app.app_state.config is not None:
+            self.app.app_state.config["debug"] = bool(self.debug_var.get())
+        self.app.refresh_nav()
+
+    def on_show(self):
+        # picks up a debug change made on the Settings screen since this screen was built.
+        self.debug_var.set(bool((self.app.app_state.config or {}).get("debug", False)))
+
     def _ensure_controller(self):
         if self.controller is None:
             if self.app.app_state.library is None:
                 self.app.app_state.library = Library()
             rows = self.app.app_state.library.rows
-            self.controller = RunController(rows, self.log_queue, self.app.app_state.config or {})
+            debug_screen = self.app.screens.get("debug")
+            frame_sink = debug_screen.push_frame if debug_screen is not None else None
+            self.controller = RunController(
+                rows, self.log_queue, self.app.app_state.config or {}, frame_sink=frame_sink)
             self.app.app_state.loop = self.controller  # so window-close stops the thread
         return self.controller
 

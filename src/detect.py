@@ -24,9 +24,8 @@ DEFAULT_INDEX = ROOT / "data" / "icons_index.json"
 
 RARITIES = ["common", "uncommon", "rare", "very rare", "ultra rare", "event"]
 
-# empirical rarity disk anchors, opencv hsv [h(0-179),s,v].
-# used bloodweb screenshots from tests/fixtures/ with src.detect sample <web_path>
-# to click nodes and print HSV vals
+# empirical rarity disk anchors, opencv hsv [h(0-179),s,v],
+# read off tests/fixtures/ screenshots via `src.detect sample <web_path>`.
 EMPIRICAL_SEED = {
     "common":     [11, 93, 51],     # brown
     "uncommon":   [61, 166, 72],    # green
@@ -36,21 +35,28 @@ EMPIRICAL_SEED = {
     "event":      [21, 213, 172],   # gold/yellow
 }
 
-# hue carries the rarity signal so weight it most
-# value is the most gamma/brightness sensitive so weight it least.
-# that weighting is most of our gamma tolerance (since gamma is adjustable param in dbd graphics settings)
+# hue carries the rarity signal (weight most), value is most gamma-sensitive (weight least);
+# that weighting is most of our tolerance to dbd's adjustable gamma.
 HSV_WEIGHTS = (4.0, 1.0, 0.3)
 
 # normalized glyph canvas size. MUST match scraper.GLYPH_SIZE
 GLYPH_SIZE = 128
 
-# icon matcher selection, 'ncc' (plain z-normed cosine over the whole glyph) is the default
-# 'phash' (perceptual-hash hamming) is the original matcher, kept for comparison
-MATCHERS = ("ncc", "ncc_masked", "phash")
-NCC_RES = 128  # res of the ncc template/query vectors
+# icon matcher selection, 'cnn' (learned embedding) is the DEFAULT;
+# it beat the classical matchers decisively on real nodes (86.5% vs ncc 55.4% top1, see tools/glyph_cnn + eval_matchers cnneval).
+# 'ncc' (plain z-normed cosine) is the fallback cnn degrades to if the model is absent, 'phash' (hamming) the original.
+MATCHERS = ("cnn", "ncc", "ncc_masked", "phash")
+NCC_RES = 96  # res of the ncc template/query vectors (96 beats 128 on conf50, cheaper vectors)
 
-# rarity anchor colors: load (usr, auto-seeded from EMPIRICAL_SEED), classify,
-# TODO: User calibration for hsv colors
+# learned matcher runtime, the encoder is trained offline (tools/glyph_cnn.py, torch dev-only) and exported to onnx;
+# here we only RUN it via cv2.dnn so no torch ships. the onnx is a read-only bundled asset (resource_path),
+# the per-sprite embedding bank builds into cache_dir on first use like the ncc templates.
+# CNN_RES must match the encoder input (tools/glyph_cnn.INPUT_RES).
+CNN_ONNX = paths.resource_path("data/models/glyph_encoder.onnx")
+CNN_RES = 96
+
+# rarity anchor colors: load from usr (auto-seeded from EMPIRICAL_SEED), then classify.
+# TODO: user calibration for hsv colors
 _HSVs = None  # cached {rarity: [h, s, v]} for the run
 
 NODE_SHAPE_DICT = { # geometric relationship of node content and node type
@@ -88,8 +94,8 @@ def get_ref_hsvs():
         return _HSVs
     if _is_nonempty(USR_HSV):
         _HSVs = _load_hsv(USR_HSV)
-        # backfill any anchor the usr file predates (e.g. the 'event' band added to the seed
-        # after an earlier file was written) so a stale usr/ doesn't silently drop a tier
+        # backfill any anchor the usr file predates (e.g. the 'event' band added later),
+        # so a stale usr/ doesn't silently drop a tier
         for rar, hsv in EMPIRICAL_SEED.items():
             _HSVs.setdefault(rar, list(hsv))
     else:
@@ -124,10 +130,9 @@ def hue_circular_mean(hues):
 
 
 def hue_band_mask(hsv, h_ref, h_tol, s_floor=0, v_floor=0):
-    """uint8 (h,w) mask of pixels within h_tol of h_ref on the hue wheel and above the s/v
-    floors. wraps the 0/180 seam that cv2.inRange can't (via hue_circular_delta), so this is
-    the one place band+inrange lives: refine_node isolates one rarity, disk_color_mask ORs it
-    over all five. hsv is a (h,w,3) opencv-hsv image."""
+    """uint8 (h,w) mask of pixels within h_tol of h_ref on the hue wheel and above the s/v floors.
+    wraps the 0/180 seam cv2.inRange can't (via hue_circular_delta): refine_node isolates one rarity, disk_color_mask ORs all five.
+    hsv is a (h,w,3) opencv-hsv image."""
     h, s, v = hsv[..., 0], hsv[..., 1], hsv[..., 2]
     band = (np.abs(hue_circular_delta(h, h_ref)) <= h_tol) & (s >= s_floor) & (v >= v_floor)
     return band.astype(np.uint8) * 255
@@ -158,14 +163,10 @@ def disk_color_mask(frame, htol=8, s_floor=62, v_floor=38):
 
 
 def refine_ref_hsvs(disk_samples, seed=None, out_path=USR_HSV, min_samples=3):
-    """auto-update anchors from real disk colors. disk_samples is a list of (h,s,v) read off a frame (localize feeds these). each sample groups to its nearest seed anchor,
-    then the anchor becomes the median of its group. median, not mean,
-    so a stray glyph/glow pixel or a mid-animation disk doesn't drag it.
-    a rarity with too few samples keeps the seed.
-    writes {rarity:[h,s,v]} to usr/ and refreshes the cache.
-
-    groups against the stable EMPIRICAL_SEED (a hue-band label) so the reference can't drift
-    while the written values still track the user's monitor over webs."""
+    """auto-update anchors from real disk colors (disk_samples = list of (h,s,v) read off a frame, localize feeds these).
+    each sample groups to its nearest seed anchor, then the anchor becomes that group's median (not mean, so a stray glyph/glow pixel or mid-animation disk can't drag it).
+    a rarity with too few samples keeps the seed. writes {rarity:[h,s,v]} to usr/ and refreshes the cache.
+    groups against the stable EMPIRICAL_SEED so the reference can't drift while the written values still track the user's monitor over webs."""
     seed = seed or {rar: list(hsv) for rar, hsv in EMPIRICAL_SEED.items()}
     groups = {rar: [] for rar in seed}
     for hsv in disk_samples:
@@ -197,11 +198,8 @@ def load_index(index_path=DEFAULT_INDEX):
 
 def id_icon_hamming(icon_bgr, rows, ref_hashes, pool=None):
     """nearest neighbor of an unknown icon via hamming distance between its phash and the library phashes.
-    pool is an optional bool mask (n,) to restrict the search to a category,
-    once we read the node's socket shape, giving a smaller cleaner candidate set.
-    returns (row, dist, margin, runner_up_row): best row, its hamming distance (0..64, lower is
-    better), the gap to the 2nd best (a small gap means an ambiguous match), and that 2nd-best row
-    (a debug diagnostic for near-tie margins)."""
+    pool is an optional bool mask (n,) restricting the search to a category (once we know the socket shape).
+    returns (row, dist, margin, runner_up_row): best row, its hamming distance (0..64, lower better), gap to the 2nd best (small = ambiguous), and that 2nd-best row (debug)."""
     gray = cv2.cvtColor(icon_bgr, cv2.COLOR_BGR2GRAY) # same luma weights as PIL 'L'
     q = imagehash.phash(Image.fromarray(gray)).hash.flatten() # (64,) bool
     dists = np.count_nonzero(ref_hashes != q, axis=1) # (n,) hamming: differing bits
@@ -212,9 +210,8 @@ def id_icon_hamming(icon_bgr, rows, ref_hashes, pool=None):
 
 
 def _sprite_glyph_gray(path, out_size=GLYPH_SIZE):
-    """load a library sprite and frame it exactly like scraper.normalize_sprite
-    (alpha tight-crop -> square-pad on black -> resize), returning a grayscale glyph (h,w) uint8
-    the ncc templates are built from these so a query glyph (normalize_glyph output) compares effectively"""
+    """load a library sprite and frame it like scraper.normalize_sprite (alpha tight-crop -> square-pad on black -> resize), returning a grayscale (h,w) uint8 glyph.
+    the ncc templates are built from these so a query glyph (normalize_glyph output) compares cleanly."""
     img = Image.open(path).convert("RGBA")
     bbox = img.getbbox()
     g = img.crop(bbox) if bbox else img
@@ -234,8 +231,8 @@ def load_ncc_templates(rows, index_path=DEFAULT_INDEX, res=NCC_RES):
     """build (or load cached) the ncc template matrix: each library sprite -> a res*res grayscale vector,
     returns (T, T2): T = (n, res*res) float32 raw vectors,
     T2 = T**2 (reused for the masked-cosine template norms)"""
-    # cache in the writable cache dir (repo data/ in dev, %APPDATA%/dbdbp/cache when frozen) so the
-    # save works even when the bundled index sits in a read-only dir.
+    # cache in the writable cache dir (repo data/ in dev, %APPDATA%/dbdbp/cache when frozen),
+    # so the save works even when the bundled index sits in a read-only dir
     cache = paths.cache_dir() / f"{Path(index_path).stem}.ncc{res}.npy"
     if cache.is_file() and cache.stat().st_mtime >= Path(index_path).stat().st_mtime:
         T = np.load(cache)
@@ -249,18 +246,14 @@ def load_ncc_templates(rows, index_path=DEFAULT_INDEX, res=NCC_RES):
         cache.parent.mkdir(parents=True, exist_ok=True)
         np.save(cache, T)
     except OSError:
-        pass # read-only cache dir (e.g. frozen exe) -- just rebuild next run
+        pass # read-only cache dir (e.g. frozen exe), just rebuild next run
     return T, T * T
 
 
 def id_icon_ncc_masked(icon_bgr, rows, templates, pool=None, res=NCC_RES, fg_frac=0.15, fg_floor=20):
-    """masked normalized cross-correlation matcher
-    build a foreground mask from the query glyph (its bright strokes)
-    and score each template by cosine over just those pixels
-    templates = (T, T2) from load_ncc_templates.
-    returns (row, score, margin, runner_up_row)
-    score = masked cosine in [-1, 1] (higher better, unlike phash), margin = best - 2nd best,
-    runner_up_row = the 2nd-best row (a debug diagnostic for near-tie margins)."""
+    """masked normalized cross-correlation matcher.
+    build a foreground mask from the query glyph's bright strokes, score each template by cosine over just those pixels (templates = (T, T2) from load_ncc_templates).
+    returns (row, score, margin, runner_up_row): score = masked cosine in [-1,1] (higher better, unlike phash), margin = best - 2nd, runner_up_row = 2nd-best (debug)."""
     T, T2 = templates
     q = _glyph_to_vec(cv2.cvtColor(icon_bgr, cv2.COLOR_BGR2GRAY), res)
     m = (q > max(fg_floor, q.max() * fg_frac)).astype(np.float32)   # query foreground strokes
@@ -278,9 +271,9 @@ def id_icon_ncc_masked(icon_bgr, rows, templates, pool=None, res=NCC_RES, fg_fra
 
 
 def ncc_plain_templates(templates):
-    """z-normed (mean-removed, unit-norm) template matrix for the plain-ncc matcher
-    plain ncc keeps the whole glyph-on-black silhouette rather than masking to bright strokes,
-    so it z-norms the full vector. built once per run then reused across nodes"""
+    """z-normed (mean-removed, unit-norm) template matrix for the plain-ncc matcher.
+    plain ncc keeps the whole glyph-on-black silhouette rather than masking to bright strokes, so it z-norms the full vector.
+    built once per run then reused across nodes."""
     T, _ = templates
     Tz = T - T.mean(axis=1, keepdims=True)         # remove each template's DC level
     Tz /= (np.linalg.norm(Tz, axis=1, keepdims=True) + 1e-6)
@@ -288,13 +281,9 @@ def ncc_plain_templates(templates):
 
 
 def id_icon_ncc(icon_bgr, rows, Tz, pool=None, res=NCC_RES):
-    """plain normalized cross-correlation matcher
-    z-normed cosine between the whole query glyph and each z-normed template (Tz from ncc_plain_templates).
-    unlike id_icon_ncc_masked this keeps the full glyph-on-black silhouette,
-    instead of masking to bright strokes
-    returns (row, score, margin, runner_up_row)
-    score = cosine in [-1, 1] (HIGHER is better), margin = gap to the 2nd best,
-    runner_up_row = the 2nd-best row (a debug diagnostic for near-tie margins)."""
+    """plain normalized cross-correlation matcher.
+    z-normed cosine between the whole query glyph and each z-normed template (Tz from ncc_plain_templates); unlike id_icon_ncc_masked this keeps the full glyph-on-black silhouette rather than masking to bright strokes.
+    returns (row, score, margin, runner_up_row): score = cosine in [-1,1] (HIGHER better), margin = gap to 2nd best, runner_up_row = 2nd-best (debug)."""
     q = _glyph_to_vec(cv2.cvtColor(icon_bgr, cv2.COLOR_BGR2GRAY), res)
     q = q - q.mean()
     q /= (np.linalg.norm(q) + 1e-6)
@@ -302,6 +291,94 @@ def id_icon_ncc(icon_bgr, rows, Tz, pool=None, res=NCC_RES):
     if pool is not None:
         scores = np.where(pool, scores, -2.0)                      # below the min possible cosine
     order = np.argsort(-scores)                                    # higher cosine = better
+    return (rows[order[0]], float(scores[order[0]]),
+            float(scores[order[0]] - scores[order[1]]), rows[order[1]])
+
+
+# ---- learned (cnn) matcher: embed the glyph via cv2.dnn, nearest cosine over a sprite-embedding bank
+
+_CNN_NET = None                # lazily loaded cv2.dnn net (one model, reused across nodes)
+_CNN_BANK = None               # (cache_key, (n,128) bank) so repeated detect() calls skip the rebuild
+
+
+def _sprite_glyph_color(path):
+    """clean color sprite framed like _sprite_glyph_gray but kept in bgr at native square size, the cnn anchor.
+    must match the training anchor (tools/synth_glyphs.gallery_glyph) so a bank embedding lands where the encoder learned to map this icon; _cnn_blob does the resize to the encoder input."""
+    img = Image.open(path).convert("RGBA")
+    bbox = img.getbbox()
+    g = img.crop(bbox) if bbox else img
+    gw, gh = g.size
+    side = max(gw, gh)
+    canvas = Image.new("RGBA", (side, side), (0, 0, 0, 255))
+    canvas.alpha_composite(g, ((side - gw) // 2, (side - gh) // 2))
+    return cv2.cvtColor(np.array(canvas.convert("RGB")), cv2.COLOR_RGB2BGR)
+
+
+def _cnn_blob(bgr, res=CNN_RES):
+    """glyph/anchor bgr -> (1,3,res,res) float32 nchw in [0,1], the cv2.dnn input.
+    same INTER_AREA resize + /255 the encoder trained on (tools/synth_glyphs.to_input); bgr order kept on purpose."""
+    x = cv2.resize(bgr, (res, res), interpolation=cv2.INTER_AREA).astype(np.float32) / 255.0
+    return x.transpose(2, 0, 1)[None]
+
+
+def _cnn_embed(net, bgr):
+    """one glyph -> l2-normed 128 embedding.
+    the l2-norm is done here in numpy, not in the onnx graph, so the export stays basic-ops for the old opencv (4.6.0) dnn importer."""
+    net.setInput(_cnn_blob(bgr))
+    e = net.forward().reshape(-1).astype(np.float32)
+    return e / (np.linalg.norm(e) + 1e-9)
+
+
+def load_cnn_model():
+    """the cv2.dnn encoder, or None if the trained onnx isn't present yet (a fresh dev checkout without a model degrades to ncc instead of crashing).
+    re-checks the file until it loads, then caches the net for the run."""
+    global _CNN_NET
+    if _CNN_NET is not None:
+        return _CNN_NET
+    if not Path(CNN_ONNX).is_file():
+        return None
+    _CNN_NET = cv2.dnn.readNetFromONNX(str(CNN_ONNX))
+    return _CNN_NET
+
+
+def load_cnn_bank(rows, index_path=DEFAULT_INDEX):
+    """(n,128) l2-normed sprite-embedding bank aligned to rows, cached to cache_dir like the ncc templates.
+    invalidated by the index mtime (library changed) or onnx mtime (retrained), so a self-updating library or new model rebuilds it automatically.
+    built over the FULL rows (pool masks the unavailable ones at match time, same as the ncc path)."""
+    global _CNN_BANK
+    onnx_mtime = Path(CNN_ONNX).stat().st_mtime
+    key = (len(rows), onnx_mtime)
+    if _CNN_BANK is not None and _CNN_BANK[0] == key:
+        return _CNN_BANK[1]
+    cache = paths.cache_dir() / f"embed-{Path(CNN_ONNX).stem}-{CNN_RES}-{len(rows)}.npy"
+    fresh = max(Path(index_path).stat().st_mtime, onnx_mtime)
+    B = None
+    if cache.is_file() and cache.stat().st_mtime >= fresh:
+        B = np.load(cache)
+        if B.shape[0] != len(rows):
+            B = None
+    if B is None:
+        net = load_cnn_model()
+        base = Path(index_path).parent
+        B = np.stack([_cnn_embed(net, _sprite_glyph_color(base / r["file"])) for r in rows]).astype(np.float32)
+        try:
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            np.save(cache, B)
+        except OSError:
+            pass  # read-only cache dir (frozen), rebuild next run
+    _CNN_BANK = (key, B)
+    return B
+
+
+def id_icon_cnn(icon_bgr, rows, bank, net, pool=None):
+    """learned metric matcher: embed the query glyph, take the nearest cosine over the cached sprite-embedding bank (bank (n,128) l2-normed aligned to rows, net the cv2.dnn encoder).
+    pool masks out-of-pool rows like id_icon_ncc.
+    returns (row, score, margin, runner_up_row); score = cosine in [-1,1] (HIGHER better)."""
+    q = _cnn_embed(net, icon_bgr)
+    scores = bank @ q                                              # (n,) cosine, both l2-normed
+    if pool is not None:
+        scores = np.where(pool, scores, -2.0)                      # below the min possible cosine
+    order = np.argsort(-scores)
     return (rows[order[0]], float(scores[order[0]]),
             float(scores[order[0]] - scores[order[1]]), rows[order[1]])
 
@@ -318,9 +395,8 @@ def _crop_glyph_from_frame(frame, x, y, r, r_tol=1):
 
 def _fill_holes(bin_img):
     """fill regions enclosed by a closed rim so each ringed disk becomes a solid blob.
-    pad a 1px background ring first so the flood seed (0,0) is ALWAYS background,
-    even when the mask runs to the crop edge.
-    without the pad, a blob touching (0,0) makes the floodfill paint the whole crop white"""
+    pad a 1px bg ring first so the flood seed (0,0) is ALWAYS background even when the mask runs to the crop edge;
+    without the pad a blob touching (0,0) makes floodfill paint the whole crop white."""
     padded = cv2.copyMakeBorder(bin_img, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0)
     ff = padded.copy()
     mask = np.zeros((padded.shape[0] + 2, padded.shape[1] + 2), np.uint8) # floodFill wants a +2 border mask
@@ -368,9 +444,7 @@ def find_circles(
         - rough pass to grab the radii of all countour within (rmin,rmax)
         - peak finding to identify node centers
 
-    rmin/rmax default to None, which resolves to resolution.rmin/rmax (resolution itself defaults
-    to Resolution.from_frame(frame), so an explicit rmin/rmax still overrides the resolution-derived
-    value when given, same as before this became resolution-aware).
+    rmin/rmax default to None -> resolution.rmin/rmax (resolution defaults to Resolution.from_frame(frame)); an explicit rmin/rmax still overrides.
     """
     resolution = resolution or Resolution.from_frame(frame)
     rmin = resolution.rmin if rmin is None else rmin
@@ -409,9 +483,11 @@ def find_circles(
             (_, _), r = cv2.minEnclosingCircle(c)
             if rmin <= r <= rmax:
                 radii.append(r)
-        if not radii: 
-            # TODO: implement error handling for if no radii found (fail loudly)
+        if not radii:
+            # nothing node-sized in the frame (menu, transition, prestige screen);
+            # returning empty beats the int(nan) crash the median below would raise
             print("ERROR: no radii found in initial pass")
+            return []
         r0 = np.median(radii)
         #print(r0)
 
@@ -434,15 +510,255 @@ def find_circles(
         for i in range(1,n):
             cx, cy = centroids[i]
             r = float(dist[int(cy), int(cx)])
-            circles.append((cx, cy, r)) 
+            # upper radius gate: nodes on one web are all ~r0 (median),
+            # so a peak well past it is a non-node blob (masked-ui rect, campfire texture: dist 79 vs r0 55 on the 005122 fixture).
+            # r0-relative since 1.2*rmax let that campfire blob through.
+            # the LOWER bound stays the loose is_peak r0_floor on purpose: a partially filled disk (rim gap the flood fill leaked through) reads a LOW dist and must not be dropped.
+            if r <= 1.35 * r0:
+                circles.append((cx, cy, r))
 
     if debug: _show(bin_frame, title='find_circles() - final', circles=circles, contours=contours, savefig=False)
     return circles # list of (x, y, r) float
 
 
+# ---------------------------------------------------------------------------
+# slot lattice: bloodweb nodes sit on a FIXED polar grid around the web center (Resolution.LATTICE_*).
+# find_circles' contour pass both misses real nodes (dim/unreachable, event golds) and invents circles from fog/ground/web junctions,
+# but the two populations separate cleanly by distance to the nearest slot (~10px real vs 40px+ junk on every web measured).
+# so: fit the lattice, SNAP what lands on a slot, DROP what doesn't, and run a matched-filter presence test on the empty slots to recover misses.
+# ---------------------------------------------------------------------------
+
+LATTICE_SNAP_TOL = 25    # baseline px, max circle-to-slot distance to accept a snap
+LATTICE_TPL_TOL = 12     # baseline px, only this-well-centered snaps feed the template
+PRESENCE_HALF = 62       # baseline px, half-size of the presence template crop
+PRESENCE_SEARCH = 20     # baseline px, +- search window around an empty slot
+PRESENCE_THRESH = 0.32   # presence floor: real misses scored >=0.39, empty slots <=0.27
+PRESENCE_MIN_N = 40      # nodes the template must average before recovery runs (~2 scans)
+PRESENCE_MAX_N = 2000    # stop accumulating here, the mean is long converged
+TPL_CANON = 2 * PRESENCE_HALF   # template edge at baseline scale, one cache serves any resolution
+
+
+def lattice_slots(cx, cy, scale):
+    """slot centers of the bloodweb lattice at a given center and scale.
+    returns ((n,2) float xy, (n,) ring index), n=30 at the full three-ring layout."""
+    pts, rings = [], []
+    for ri, (rr, ph, ns) in enumerate(zip(
+            Resolution.LATTICE_RADII, Resolution.LATTICE_PHASES, Resolution.LATTICE_SLOTS)):
+        ang = np.radians(ph + np.arange(ns) * (360.0 / ns))
+        pts.append(np.stack(
+            [cx + scale * rr * np.cos(ang), cy + scale * rr * np.sin(ang)], axis=1))
+        rings.extend([ri] * ns)
+    return np.concatenate(pts), np.asarray(rings)
+
+
+def _center_cost(pts, cx_grid, cy_grid, scale):
+    """clipped-and-normalized lattice cost of candidate centers: how far each circle sits from its nearest ring radius, capped at 30px-of-scale.
+    so junk circles can't drag the fit and it stays comparable ACROSS scales (an un-normalized clip always favors the smaller scale)."""
+    radii = scale * np.asarray(Resolution.LATTICE_RADII)
+    d = np.sqrt((pts[:, 0, None, None] - cx_grid) ** 2 + (pts[:, 1, None, None] - cy_grid) ** 2)
+    resid = np.min(np.abs(d[..., None] - radii), axis=-1)
+    return np.minimum(resid / (30.0 * scale), 1.0).mean(axis=0)
+
+
+def _fit_center_slots(pts, c0, scale, span, step):
+    """center grid refine against the FULL slot positions: the radial cost alone leaves the angle unconstrained (a shifted center can ride circles onto a neighboring ring), the slot distance can't be gamed that way.
+    span/step are in baseline px like the other tolerances."""
+    offs, _ = lattice_slots(0.0, 0.0, scale)   # slot offsets from a zero center
+    xs = np.arange(c0[0] - span * scale, c0[0] + span * scale + 1e-6, step * scale)
+    ys = np.arange(c0[1] - span * scale, c0[1] + span * scale + 1e-6, step * scale)
+    XX, YY = np.meshgrid(xs, ys)
+    mind = None
+    for ux, uy in offs:   # running min over slots keeps the arrays (n, ny, nx) flat
+        d = np.sqrt((pts[:, 0, None, None] - (XX + ux)) ** 2
+                    + (pts[:, 1, None, None] - (YY + uy)) ** 2)
+        mind = d if mind is None else np.minimum(mind, d)
+    cost = np.minimum(mind / (30.0 * scale), 1.0).mean(axis=0)
+    iy, ix = np.unravel_index(np.argmin(cost), cost.shape)
+    return float(XX[iy, ix]), float(YY[iy, ix])
+
+
+def _fit_center_scale_joint(pts, s_lo, s_hi):
+    """joint coarse search over (center, scale): the marginals are unstable (a center found at the wrong scale drifts, a scale swept at the wrong center aliases onto the wrong ring), so sweep scale and grid the center together and keep the jointly cheapest cell."""
+    c0 = pts.mean(axis=0)
+    best = None
+    for s in np.arange(s_lo, s_hi, 0.05):
+        span, step = 150.0 * s, 5.0 * s
+        xs = np.arange(c0[0] - span, c0[0] + span + 1e-6, step)
+        ys = np.arange(c0[1] - span, c0[1] + span + 1e-6, step)
+        XX, YY = np.meshgrid(xs, ys)
+        cost = _center_cost(pts, XX, YY, s)
+        iy, ix = np.unravel_index(np.argmin(cost), cost.shape)
+        if best is None or cost[iy, ix] < best[0]:
+            best = (float(cost[iy, ix]), float(XX[iy, ix]), float(YY[iy, ix]), float(s))
+    return best[1], best[2], best[3]
+
+
+def _scale_search(d, s_lo, s_hi):
+    """1-d sweep for the lattice scale: the s that puts the circle-to-center distances nearest the ring radii.
+    residuals clip NORMALIZED (resid / clip, like _center_cost) so junk circles can't drag it and a smaller s can't win by shrinking every clip.
+    the caller must bound the sweep off the frame scale: with only one ring occupied (early webs) the inner ring fits ring 1 at half scale exactly, and only the bounds break that tie."""
+    radii = np.asarray(Resolution.LATTICE_RADII)
+    ss = np.arange(s_lo, s_hi, 0.01)
+    resid = np.min(np.abs(d[:, None, None] - ss[None, :, None] * radii[None, None, :]), axis=2)
+    cost = np.minimum(resid / (30.0 * ss[None, :]), 1.0).mean(axis=0)
+    return float(ss[np.argmin(cost)])
+
+
+def fit_lattice(circles, center=None, scale_hint=1.0):
+    """fit (cx, cy, scale) of the slot lattice to find_circles output.
+    center is the glow center when the caller has one (find_center_node), else it is grid-searched jointly with the scale.
+    scale comes from sweeping the circle-to-ring distances against the known ring radii, bounded off scale_hint (the frame's Resolution.scale): a web-bbox crop under-reads the true scale, so the bracket runs 0.85-1.6x, wide enough for crop-vs-full but too narrow for the half-scale alias a single-ring web would otherwise fit.
+    (the detected circle radii are NOT the scale source: dist-transform peaks stop at the socket ring and under-read ~20%.)
+    returns None when the circles are too few or the best fit doesn't hold the lattice."""
+    if len(circles) < (3 if center is not None else 6):
+        return None
+    pts = np.asarray([(x, y) for x, y, _ in circles], dtype=np.float32)
+    radii = np.asarray(Resolution.LATTICE_RADII)
+    s_lo, s_hi = 0.85 * scale_hint, 1.6 * scale_hint
+
+    if center is not None:
+        cx, cy = float(center[0]), float(center[1])
+        d = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy)
+        s = _scale_search(d, s_lo, s_hi)
+    else:
+        cx, cy, s = _fit_center_scale_joint(pts, s_lo, s_hi)
+        cx, cy = _fit_center_slots(pts, (cx, cy), s, span=80.0, step=4.0)
+        d = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy)
+        s = _scale_search(d, max(s_lo, s - 0.1), min(s_hi, s + 0.1))
+    for _ in range(2):   # polish scale on the inlier median, re-center when the center was fitted
+        d = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy)
+        ring = np.argmin(np.abs(d[:, None] - s * radii[None, :]), axis=1)
+        ratio = d / radii[ring]
+        ok = np.abs(ratio - s) <= 0.08 * s
+        if ok.sum() >= 3:
+            s = float(np.median(ratio[ok]))
+        if center is None:
+            cx, cy = _fit_center_slots(pts, (cx, cy), s, span=8.0, step=1.0)
+    d = np.hypot(pts[:, 0] - cx, pts[:, 1] - cy)
+    inliers = int((np.min(np.abs(d[:, None] - s * radii[None, :]), axis=1)
+                   <= LATTICE_SNAP_TOL * s).sum())
+    if inliers < 3:
+        return None   # the circles don't hold the lattice (not a bloodweb frame?)
+    return cx, cy, s
+
+
+def snap_to_lattice(circles, cx, cy, scale):
+    """assign each circle to its nearest slot, one circle per slot (nearest wins).
+    snapped nodes take the SLOT position and calibrated radius: a real node sits within ~10px of its slot while a merged-contour centroid can drift 40px off, so the slot is the safer click/crop center.
+    returns (snapped [(x,y,r,slot_idx)], taken slot-idx set, dropped [(x,y,r,slot_dist)], tpl_pts well-centered circle centers)."""
+    slots, _ = lattice_slots(cx, cy, scale)
+    node_r = Resolution.NODE_RADIUS * scale
+    best, dropped = {}, []
+    for x, y, r in circles:
+        d = np.hypot(slots[:, 0] - x, slots[:, 1] - y)
+        i = int(np.argmin(d))
+        if d[i] > LATTICE_SNAP_TOL * scale:
+            dropped.append((x, y, r, float(d[i])))
+        elif i not in best or d[i] < best[i][0]:
+            best[i] = (float(d[i]), (x, y))
+    snapped = [(float(slots[i][0]), float(slots[i][1]), node_r, i) for i in sorted(best)]
+    tpl_pts = [xy for dist, xy in best.values() if dist <= LATTICE_TPL_TOL * scale]
+    return snapped, set(best), dropped, tpl_pts
+
+
+_RING_TPL = None    # cached [gray_sum, grad_sum, n] for the run
+
+
+def _ring_tpl_path():
+    return paths.cache_dir() / "ring-template.npz"
+
+
+def _get_ring_tpl():
+    global _RING_TPL
+    if _RING_TPL is None:
+        p = _ring_tpl_path()
+        if p.exists():
+            z = np.load(p)
+            _RING_TPL = [z["gray"], z["grad"], int(z["n"])]
+        else:
+            _RING_TPL = [np.zeros((TPL_CANON, TPL_CANON), np.float64),
+                         np.zeros((TPL_CANON, TPL_CANON), np.float64), 0]
+    return _RING_TPL
+
+
+def _grad_mag(gray32):
+    """sobel gradient magnitude, the texture-insensitive half of the presence score."""
+    gx = cv2.Sobel(gray32, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray32, cv2.CV_32F, 0, 1, ksize=3)
+    return cv2.magnitude(gx, gy)
+
+
+def _crop_square(img, x, y, half):
+    """(2*half, 2*half) crop centered on (x, y), or None when it runs off the frame."""
+    x, y = int(round(x)), int(round(y))
+    if x - half < 0 or y - half < 0 or x + half > img.shape[1] or y + half > img.shape[0]:
+        return None
+    return np.ascontiguousarray(img[y - half:y + half, x - half:x + half])
+
+
+def update_ring_template(gray, grad, tpl_pts, scale):
+    """fold this scan's well-centered snapped nodes into the running mean node crop.
+    over enough nodes the glyphs average out and the ring + plate signature remains, giving a matched filter for 'a node is here' from the USER'S OWN capture (map, gamma, resolution).
+    persisted like the ncc cache so it survives runs."""
+    tpl = _get_ring_tpl()
+    if tpl[2] >= PRESENCE_MAX_N or not tpl_pts:
+        return
+    half = int(round(PRESENCE_HALF * scale))
+    for x, y in tpl_pts:
+        cg = _crop_square(gray, x, y, half)
+        ce = _crop_square(grad, x, y, half)
+        if cg is None or ce is None:
+            continue
+        tpl[0] += cv2.resize(cg, (TPL_CANON, TPL_CANON)).astype(np.float64)
+        tpl[1] += cv2.resize(ce, (TPL_CANON, TPL_CANON)).astype(np.float64)
+        tpl[2] += 1
+    try:
+        p = _ring_tpl_path()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        np.savez_compressed(p, gray=tpl[0], grad=tpl[1], n=tpl[2])
+    except OSError:
+        pass    # cache write failing shouldn't kill a scan, the in-memory template still works
+
+
+def recover_missed_slots(gray, grad, empty_slots, scale, debug=False):
+    """matched-filter presence test on the slots the contour pass left empty.
+    scores each slot with z-normed ncc of the mean-node template on gray + gradient crops (mean of the two, +-PRESENCE_SEARCH window); on the validation scans every real miss scored >=0.39 and every empty slot <=0.27.
+    returns [(x, y, score)] at the ncc peak, empty until the template has seen PRESENCE_MIN_N nodes."""
+    tpl = _get_ring_tpl()
+    if tpl[2] < PRESENCE_MIN_N:
+        if debug:
+            print(f"[lattice] presence template still warming ({tpl[2]}/{PRESENCE_MIN_N} nodes)")
+        return []
+    half = int(round(PRESENCE_HALF * scale))
+    search = int(round(PRESENCE_SEARCH * scale))
+    tg = cv2.resize((tpl[0] / tpl[2]).astype(np.float32), (2 * half, 2 * half))
+    te = cv2.resize((tpl[1] / tpl[2]).astype(np.float32), (2 * half, 2 * half))
+    h_img, w_img = gray.shape[:2]
+    found = []
+    for sx, sy in empty_slots:
+        # web bbox crop can run right up to the outer ring,
+        # so shrink the search window to whatever margin the frame leaves rather than skip the edge slot (peak is within a few px anyway); below zero even the template doesn't fit
+        sxi, syi = int(round(sx)), int(round(sy))
+        margin = min(sxi, syi, w_img - sxi, h_img - syi)
+        s_here = min(search, margin - half)
+        if s_here < 0:
+            continue
+        cg = _crop_square(gray, sxi, syi, half + s_here)
+        ce = _crop_square(grad, sxi, syi, half + s_here)
+        if cg is None or ce is None:
+            continue
+        comb = 0.5 * cv2.matchTemplate(cg, tg, cv2.TM_CCOEFF_NORMED) \
+             + 0.5 * cv2.matchTemplate(ce, te, cv2.TM_CCOEFF_NORMED)
+        iy, ix = np.unravel_index(int(np.argmax(comb)), comb.shape)
+        score = float(comb[iy, ix])
+        if score >= PRESENCE_THRESH:
+            found.append((sxi - s_here + int(ix), syi - s_here + int(iy), score))
+    return found
+
+
 def sample_disk_hsv(hsv, x, y, r, s_floor=30, v_floor=20, min_px=6):
-    """median hsv over an annulus around the disk, away from the glyph. annulus not full disk
-    so the center glyph and rim anti-aliasing don't pollute the rarity read."""
+    """median hsv over an annulus around the disk, away from the glyph.
+    annulus not full disk so the center glyph and rim anti-aliasing don't pollute the rarity read."""
     h, w = hsv.shape[:2]
     yy, xx = np.ogrid[:h, :w]
     d2 = (xx - x) ** 2 + (yy - y) ** 2 # squared dist of every px from center
@@ -463,18 +779,47 @@ def sample_disk_hsv(hsv, x, y, r, s_floor=30, v_floor=20, min_px=6):
 
 def find_nodes_in_frame(
         frame, debug=False, max_anchor_dist=None, thresh_method='adaptive_gaussian',
-        use_hough=False, resolution=None
+        use_hough=False, resolution=None, center=None, use_lattice=True
     ):
     """find all circles in the blood web and clean them up to identify clickable nodes.
-    thresh_method picks the binarization find_circles uses (adaptive_gaussian|otsu|canny) and
-    use_hough swaps the localizer between the contour pass (default) and HoughCircles, both threaded
-    from detect() so the settings ui can tune them. resolution (a Resolution, default
-    Resolution.from_frame(frame) inside find_circles) scales its rmin/rmax to this frame's size."""
+    thresh_method picks find_circles' binarization (adaptive_gaussian|otsu|canny), use_hough swaps the localizer between the contour pass (default) and HoughCircles, both threaded from detect() so the settings ui can tune them.
+    resolution (a Resolution, default Resolution.from_frame(frame)) scales rmin/rmax to this frame's size.
+    use_lattice snaps circles onto the fixed slot grid (dropping off-slot junk) and runs the presence test on empty slots to recover contour misses.
+    center is find_center_node's (x, y, r) when the caller already computed it (detect() does), else found here."""
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) # (H,W,3), for the per-circle color read
     circles = find_circles(
         frame, thresh_method=thresh_method, use_hough=use_hough,
         debug=False, resolution=resolution
     ) # list of (x, y, r)
+
+    if use_lattice and circles:
+        if center is None:
+            center = find_center_node(frame)
+        resolution = resolution or Resolution.from_frame(frame)
+        fit = fit_lattice(circles, center=center, scale_hint=resolution.scale)
+        if fit is None:
+            if debug:
+                print(f"[lattice] fit skipped ({len(circles)} circles, "
+                      f"center {'found' if center else 'missing'}), keeping raw detections")
+        else:
+            cx, cy, s = fit
+            snapped, taken, dropped, tpl_pts = snap_to_lattice(circles, cx, cy, s)
+            if debug:
+                print(f"[lattice] center=({cx:.0f},{cy:.0f}) scale={s:.3f}: "
+                      f"{len(snapped)} snapped, {len(dropped)} junk dropped")
+                for x, y, r, d in dropped:
+                    print(f"[lattice]   dropped ({x:.0f},{y:.0f}) r={r:.0f}, {d:.0f}px off-slot")
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
+            grad = _grad_mag(gray)
+            update_ring_template(gray, grad, tpl_pts, s)
+            circles = [(x, y, r) for x, y, r, _ in snapped]
+            if len(snapped) >= 3:   # a bogus fit snaps almost nothing, don't recover off one
+                slots, _ = lattice_slots(cx, cy, s)
+                empty = [tuple(p) for i, p in enumerate(slots) if i not in taken]
+                for x, y, score in recover_missed_slots(gray, grad, empty, s, debug=debug):
+                    if debug:
+                        print(f"[lattice] recovered miss at ({x},{y}) presence={score:.2f}")
+                    circles.append((x, y, Resolution.NODE_RADIUS * s))
 
     nodes = []
     for x, y, r in circles:
@@ -496,8 +841,7 @@ def find_center_node(
         close_ksize=7, min_area_frac=0.0015, roi_frac=0.30
     ):
     """locate the center auto-spend node (dark red entity hexagon) by its glow color.
-    find_circles misses it on ~1/4 of frames and there's no rarity anchor for it, so detect it
-    off its stable signature instead: hue at the 0/180 seam, high saturation, low (dark) value.
+    find_circles misses it on ~1/4 of frames and it has no rarity anchor, so detect it off its stable signature instead: hue at the 0/180 seam, high saturation, low (dark) value.
     returns the largest such blob near the frame center as (x, y, r), or None.
     """
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
@@ -535,11 +879,9 @@ def isolate_node_contents(
         r_tol=1.5, roi_k=1.2, h_tol=8, s_floor=25, v_floor=22,
         close_ksize=5, min_area_frac=0.05
     ):
-    """crop a coarse node, color-mask its rarity socket, and pick the central blob 
-    the coarse (x,y,r) from find_circles can be off-center/undersized, so crop wide (r_tol)
-    and recenter on the socket centroid; the roi (roi_k*r around the coarse center) keeps hue
-    bleed (bronze ring / dim web) from inflating the socket blob
-    
+    """crop a coarse node, color-mask its rarity socket, and pick the central blob.
+    the coarse (x,y,r) from find_circles can be off-center/undersized, so crop wide (r_tol) and recenter on the socket centroid; the roi (roi_k*r around the coarse center) keeps hue bleed (bronze ring / dim web) from inflating the socket blob.
+
     returns (cx, cy, r, contour, crop) or None:
         cx, cy, r: full-frame click center + socket radius
         contour: crop-local socket polygon (feed classify_socket + normalize_glyph)
@@ -586,17 +928,21 @@ def isolate_node_contents(
     return int(round(cx)), int(round(cy)), int(round(r_ref)), best, crop
 
 
-def normalize_glyph(crop, contour, erode_ksize=3, out_size=GLYPH_SIZE):
-    """strip the colored socket from a node crop so only the glyph remains on black, framed to
-    match scraper.normalize_sprite (tight-crop -> square-pad centered -> resize)
+def normalize_glyph(crop, contour, rarity=None, erode_ksize=3, out_size=GLYPH_SIZE):
+    """strip the colored socket from a node crop so only the glyph remains on black, framed to match scraper.normalize_sprite (tight-crop -> square-pad centered -> resize).
 
-    glyph = the BRIGHT pixels inside the socket polygon. the white-ish glyph always sits brighter than the rarity disk fill,
-    otsu cut the socket's value channel keys the fill out without any per-rarity hue math
-    (the old hue-subtraction left colored halos and broke on gold/event) 
-    the contour is convex-hulled first so glyph strokes that touch the socket edge don't carve notches out of the interior mask.
+    glyph = the BRIGHT pixels inside the socket polygon; the white-ish glyph always sits brighter than the rarity disk fill, so an otsu cut on the value channel keys the fill out without per-rarity hue math (the old hue-subtraction left colored halos and broke on gold/event).
+    the contour is convex-hulled first so glyph strokes touching the socket edge don't carve notches out of the interior mask.
+    rarity=='event' triggers a clahe contrast boost on the value channel before the otsu cut (the gold disk is too bright for plain otsu to split the white glyph from the fill).
     returns a GLYPH_SIZE bgr glyph-on-black square, or None if nothing survives."""
     h, w = crop.shape[:2]
     val = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)[..., 2]   # value channel (brightness), (h,w)
+
+    # event/gold disks are bright enough that plain otsu can't split the white glyph from the gold fill, so the glyph blows out into gold speckle and mis-matches.
+    # clahe locally lifts the very bright glyph clear of the bright-but-less fill so the otsu cut lands cleanly.
+    # only event needs it, on the darker tiers clahe just amplifies the fill texture and hurts (verified on the 211 real labeled nodes).
+    if rarity == "event":
+        val = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(val)
 
     # interior = filled convex socket polygon, eroded a touch to shed the colored rim/anti-alias
     inside = np.zeros((h, w), np.uint8)
@@ -631,9 +977,8 @@ def normalize_glyph(crop, contour, erode_ksize=3, out_size=GLYPH_SIZE):
 
 
 def classify_socket(node_contours, poly_tol=0.05):
-    """find the category of the node contents (socket) by exploiting a pattern,
-    offerings -> hexagon; perks -> rhombus; items -> square, addons -> square with a plus
-    using the contour of the socket we detect it's shape and classify the type of glyph in the node.
+    """classify node contents by socket shape: offerings -> hexagon, perks -> rhombus, items -> square, addons -> square with a plus.
+    we detect the socket contour's shape and map it to the glyph type.
     """
     hull = cv2.convexHull(node_contours) # drop misc inner glyph noise
     _, _, bw, bh = cv2.boundingRect(hull)
@@ -648,34 +993,54 @@ def classify_socket(node_contours, poly_tol=0.05):
 
 
 def detect(
-        frame, rows=None, hashes=None, ncc_templates=None, matcher="ncc", r_tol=1.5,
-        debug=False, thresh_method="adaptive_gaussian", use_hough=False, resolution=None
+        frame, rows=None, hashes=None, ncc_templates=None, matcher="cnn", r_tol=1.5,
+        debug=False, thresh_method="adaptive_gaussian", use_hough=False, resolution=None,
+        row_pool=None, use_lattice=True,
     ):
-    """full pipeline; returns per-node dicts {x, y, r, rar, cat, glyph_bgr, match, score, margin,
-    matcher}. matcher picks identification: 'ncc' (default, plain z-normed cosine, higher=better),
-    'ncc_masked' (cosine over the query's bright strokes, higher=better), or 'phash' (hamming,
-    lower=better). score's direction follows the matcher (see _score_str). thresh_method picks the
-    node-localization binarization (adaptive_gaussian|otsu|canny) and use_hough swaps the localizer
-    (contour pass vs HoughCircles), both passed down to find_circles. resolution (a Resolution,
-    default Resolution.from_frame(frame)) scales find_circles' rmin/rmax to this frame's size."""
+    """full pipeline; returns per-node dicts {x, y, r, rar, cat, glyph_bgr, match, score, margin, matcher}.
+    matcher picks identification: 'cnn' (default, learned embedding cosine, higher=better, falls back to ncc if the model is absent), 'ncc' (plain z-normed cosine, higher=better), 'ncc_masked' (cosine over the query's bright strokes, higher=better), or 'phash' (hamming, lower=better); score's direction follows the matcher (see _score_str).
+    thresh_method picks the node-localization binarization (adaptive_gaussian|otsu|canny) and use_hough swaps the localizer (contour pass vs HoughCircles), both passed down to find_circles.
+    resolution (a Resolution, default Resolution.from_frame(frame)) scales find_circles' rmin/rmax to this frame's size.
+    row_pool (a bool sequence aligned to rows, from node.build_pool_mask) optionally narrows the match library to the priority list's icons/sources; a node whose socket shape has no candidate left in that pool is emitted pooled_out=True (unknown, skipped, never matched or ocr'd).
+    use_lattice turns the slot-lattice snap + presence recovery on (see find_nodes_in_frame)."""
     if rows is None:
         rows, hashes = load_index()
+    # resolve the learned matcher first so a missing model degrades to ncc before the rest is set up
+    cnn_net = cnn_bank = None
+    if matcher == "cnn":
+        cnn_net = load_cnn_model()
+        if cnn_net is None:
+            if debug:
+                print("cnn model not found, falling back to ncc")
+            matcher = "ncc"
+        else:
+            cnn_bank = load_cnn_bank(rows)
     if matcher == "phash" and hashes is None:
         _, hashes = load_index()
     if matcher in ("ncc", "ncc_masked") and ncc_templates is None:
         ncc_templates = load_ncc_templates(rows)
     ncc_plain_T = ncc_plain_templates(ncc_templates) if matcher == "ncc" else None
 
-    cats = np.array([r['category'] for r in rows]) # (n,) strings of 'item', 'perk', ...
+    # exclude obtainable=='unavailable' (killer powers, retired content), they never appear in the bloodweb.
+    # socket shape is no longer a candidate pool but an agreement check reconciled downstream (Node.category_agrees -> ocr fallback),
+    # so every node searches the full matchable library. (n,) bool aligned to rows.
+    matchable = np.array([r.get('obtainable') != 'unavailable' for r in rows])
+    # optional priority pool: intersect it in so matching only scores the icons/sources we care about.
+    # cats is only needed for the per-node pooled-out test below, so build it lazily here.
+    if row_pool is not None:
+        matchable = matchable & np.asarray(row_pool, dtype=bool)
+        cats = np.array([r.get('category') for r in rows])   # (n,) 'item'|'addon'|...
+    # the center auto-spend node is found by its own glow color (not the disk pipeline) and gets no glyph match;
+    # tagged kind='center' so Node/spender can reference it (see find_center_node).
+    # found BEFORE the node pass so the lattice fit can anchor on it instead of re-deriving it.
+    center = find_center_node(frame)
     nodes = find_nodes_in_frame(
         frame, debug=debug, thresh_method=thresh_method,
-        use_hough=use_hough, resolution=resolution
+        use_hough=use_hough, resolution=resolution,
+        center=center, use_lattice=use_lattice,
     ) # [(x, y, r, rarity), ...]
 
     res = []
-    # the center auto-spend node is found by its own glow color, not the disk pipeline, and gets
-    # no glyph match. tagged kind='center' so Node/spender can reference it (see find_center_node).
-    center = find_center_node(frame)
     if center is not None:
         cx, cy, r = center
         res.append({
@@ -696,19 +1061,36 @@ def detect(
         
         cx, cy, r_ref, node_contours, crop = iso
         socket_shape = classify_socket(node_contours) # use socket shape geometry to classify node type (item/addon, perk, offering)
-        glyph = normalize_glyph(crop, node_contours) # standardize glyph sizes to match with indexed icons
+        glyph = normalize_glyph(crop, node_contours, rarity) # standardize glyph sizes to match with indexed icons
         if glyph is None:
             if debug: print("WARNING: detect() - Node skipped after not finding a glyph in the socket")
             continue
 
-        # identify the glyph against the library, restricted to the socket-shape category pool
-        pool = None if socket_shape is None else np.isin(cats, NODE_SHAPE_DICT[socket_shape])
-        if matcher == "ncc":
-            best_match_row, score, margin, runner = id_icon_ncc(glyph, rows, ncc_plain_T, pool=pool)
+        # with a priority pool active, a node whose socket shape has no candidate left in the pool is outside our scope (e.g. a perk node on a survivor run that only lists items);
+        # emit it unknown so the loop skips it, no match scored and no ocr hover (see Node.pooled_out).
+        # the matcher itself still searches the whole pool so shape stays a downstream agreement check.
+        if row_pool is not None:
+            allowed = NODE_SHAPE_DICT.get(socket_shape)
+            shape_in_pool = matchable if allowed is None else (matchable & np.isin(cats, allowed))
+            if not shape_in_pool.any():
+                if debug: print(f"pooled out {socket_shape} node @ {cx},{cy}")
+                res.append({
+                    'x': cx, 'y': cy, 'r': r_ref, 'rar': rarity, 'cat': socket_shape,
+                    'glyph_bgr': glyph, 'pooled_out': True,
+                    'match': None, 'score': 0.0, 'margin': 0.0, 'matcher': matcher, 'runner_up': None,
+                })
+                continue
+
+        # identify the glyph against the full matchable library (unavailable excluded);
+        # socket shape is cross-checked downstream, not used to prune candidates here.
+        if matcher == "cnn":
+            best_match_row, score, margin, runner = id_icon_cnn(glyph, rows, cnn_bank, cnn_net, pool=matchable)
+        elif matcher == "ncc":
+            best_match_row, score, margin, runner = id_icon_ncc(glyph, rows, ncc_plain_T, pool=matchable)
         elif matcher == "ncc_masked":
-            best_match_row, score, margin, runner = id_icon_ncc_masked(glyph, rows, ncc_templates, pool=pool)
+            best_match_row, score, margin, runner = id_icon_ncc_masked(glyph, rows, ncc_templates, pool=matchable)
         else:
-            best_match_row, score, margin, runner = id_icon_hamming(glyph, rows, hashes, pool=pool)
+            best_match_row, score, margin, runner = id_icon_hamming(glyph, rows, hashes, pool=matchable)
         if debug:
             print(matcher, best_match_row['key'], round(score, 3), round(margin, 3),
                   "vs", runner['key'])
@@ -736,9 +1118,11 @@ def _score_str(n):
 
 
 def draw_detections(frame, nodes):
-    """draw each node (circle + label) onto a copy of the frame. accepts detect() result dicts
-    or the (x, y, r, rarity) tuples from find_nodes_in_frame, so it works at either stage.
-    dict label is two lines, 'rarity/socket score' then the matched name on its own line
+    """draw each node (circle + label) onto a copy of the frame. accepts detect() result dicts,
+    the (x, y, r, rarity) tuples from find_nodes_in_frame, or spender's Node objects, so it works
+    at any stage of the pipeline.
+    dict label is two lines, 'rarity/socket score' then the matched name; Node label adds a third
+    line so the matcher's read and a later ocr settle (or 'na' if none was needed) both stay visible.
     keys come straight off detect()'s output (rar, cat, score, matcher, match row)."""
     out = frame.copy()
     for n in nodes:
@@ -751,9 +1135,23 @@ def draw_detections(frame, nodes):
                 name = match.get("name") or match.get("key") or "?"
                 # name on its own line so long icon names stay legible over the busy web
                 lines = [f"{n.get('rar', '?')}/{n.get('cat', '?')} {_score_str(n)}", name]
-        else:
+        elif isinstance(n, tuple):
             x, y, r, rarity = n
             lines = [str(rarity)]
+        else:
+            # spender.Node: the boundary object the live loop resolves nodes into, post-ocr
+            x, y, r = n.x, n.y, n.r
+            if n.is_center:
+                lines = ["autospend"]
+            else:
+                # matched_name/score are the matcher's own read, frozen before ocr can overwrite
+                # node.name; ocr read is only shown when it actually settled the node (resolved_by).
+                ocr_read = n.name if n.resolved_by == "ocr" else "na"
+                lines = [
+                    f"{n.rarity}/{n.socket_shape}",
+                    f"{n.matcher}: {n.matched_name or '?'} {n.score:.2f}",
+                    f"ocr: {ocr_read}",
+                ]
         cv2.circle(out, (x, y), r, (0, 255, 0), 2)
         # stack the lines just above the circle, last line nearest the rim
         for i, line in enumerate(lines):
@@ -768,9 +1166,8 @@ def draw_detections(frame, nodes):
 # don't want highgui in the frozen exe anyway. matplotlib also gives zoom/pan for free and
 # maps clicks back to image coords even when zoomed, which the 3440x1440 frames need.
 def _sample_window(fixture_path):
-    """open a fixture and print the hsv under each click. this is how we read real disk
-    colors to set/verify the rarity anchors. median over a small patch so one noisy pixel
-    doesn't mislead."""
+    """open a fixture and print the hsv under each click, how we read real disk colors to set/verify the rarity anchors.
+    median over a small patch so one noisy pixel doesn't mislead."""
     img = cv2.imread(str(fixture_path))
     if img is None:
         raise FileNotFoundError(fixture_path)
@@ -798,18 +1195,14 @@ def _show(
         contours=None, edges=None, circles=None,
         contour_color=(0, 0, 255), edge_color=(0, 255, 0), circle_color=(255, 0, 0),
     ):
-    """show an image in a matplotlib window, with optional contour/edge/circle overlays for
-    the find_circles debugging. this conda opencv build ships no highgui backend, so cv2.imshow
-    throws 'function not implemented' (same reason _sample_window uses matplotlib).
+    """show an image in a matplotlib window, with optional contour/edge/circle overlays for find_circles debugging.
+    this conda opencv build ships no highgui backend, so cv2.imshow throws 'function not implemented' (same reason _sample_window uses matplotlib).
 
-    img is a bgr frame OR a single-channel gray/edge/mask (ndim==2, promoted to bgr so the
-    overlays can be colored). contours is a list of cv2 contours (drawn), edges is a binary
-    single-channel map (its nonzero pixels painted on), circles is a list of (x, y, r) like
-    find_circles returns (drawn as outline + center dot, floats cast to int). overlay colors
-    are bgr; composited with cv2 onto a copy, then handed to imshow."""
-    # matplotlib clips float rgb to [0,1], so a scalar float map (e.g. the distance transform)
-    # sent straight through gray2bgr shows up as solid white. normalize any non-uint8 2d input
-    # to 0-255 first so its gradient is actually visible (binary uint8 masks pass through as-is).
+    img is a bgr frame OR a single-channel gray/edge/mask (ndim==2, promoted to bgr so overlays can be colored).
+    contours is a list of cv2 contours (drawn), edges a binary single-channel map (nonzero pixels painted on), circles a list of (x, y, r) like find_circles returns (drawn as outline + center dot, floats cast to int).
+    overlay colors are bgr, composited with cv2 onto a copy then handed to imshow."""
+    # matplotlib clips float rgb to [0,1], so a scalar float map (e.g. the distance transform) sent through gray2bgr shows up solid white;
+    # normalize any non-uint8 2d input to 0-255 first so its gradient is visible (binary uint8 masks pass through as-is)
     if img.ndim == 2 and img.dtype != np.uint8:
         img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
@@ -839,11 +1232,10 @@ def _show(
 
 
 def _show_gallery(items, title="glyphs", cols=6, savefig=False):
-    """tile a set of (image, caption) pairs in a grid, each captioned. for eyeballing the
-    per-node crops/normalized glyphs next to what they got read as (rarity, socket, match),
-    instead of squinting at the whole annotated frame. images are bgr or single-channel like
-    everywhere else here; a None image draws a blank cell (e.g. normalize_glyph returned None).
-    dev-only; matplotlib since this conda cv2 has no highgui backend."""
+    """tile a set of (image, caption) pairs in a grid, each captioned.
+    for eyeballing the per-node crops/normalized glyphs next to what they read as (rarity, socket, match), instead of the whole annotated frame.
+    images are bgr or single-channel like everywhere else here; a None image draws a blank cell (e.g. normalize_glyph returned None).
+    dev-only, matplotlib since this conda cv2 has no highgui backend."""
     items = [it for it in items]
     if not items:
         print("gallery: nothing to show")

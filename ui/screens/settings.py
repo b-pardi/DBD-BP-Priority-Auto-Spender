@@ -15,8 +15,6 @@ from src import detect, ocr, spender
 from .. import config_io, theme
 from ..widgets import tooltip
 
-CNN_PLACEHOLDER = "CNN (coming soon)"
-
 
 class SettingsScreen(ctk.CTkFrame):
     def __init__(self, master, app):
@@ -44,6 +42,32 @@ class SettingsScreen(ctk.CTkFrame):
                       variable=self.tooltips_var, command=self._on_tooltips_toggle).grid(
             row=9, column=0, columnspan=2, sticky="w", padx=theme.PAD, pady=theme.PAD)
 
+        # comparison-pool narrowing: only score the library icons the priority list cares about, so
+        # a survivor run skips every killer's add-ons and vice versa (see spender.build_pool_mask).
+        # inferred = each priority item's whole bloodweb source; exclusive = only the listed icons.
+        # exclusive is a subset of inferred, so turning it on forces inferred on and locks it.
+        self.pool_inferred_var = ctk.BooleanVar(value=bool(cfg.get("pool_inferred", True)))
+        self.pool_inferred_sw = ctk.CTkSwitch(
+            form, text="Narrow match pool to priority sources (recommended)",
+            variable=self.pool_inferred_var)
+        self.pool_inferred_sw.grid(row=10, column=0, columnspan=2, sticky="w",
+                                   padx=theme.PAD, pady=(theme.PAD, 4))
+
+        self.pool_exclusive_var = ctk.BooleanVar(value=bool(cfg.get("pool_exclusive", False)))
+        ctk.CTkSwitch(form, text="Only compare against the priority list (strict)",
+                      variable=self.pool_exclusive_var, command=self._on_pool_exclusive).grid(
+            row=11, column=0, columnspan=2, sticky="w", padx=theme.PAD, pady=(4, theme.PAD))
+        self._on_pool_exclusive()   # reflect the loaded config's lock state
+
+        # weak-match fallback: by default a node whose ocr hover reads nothing falls back to its
+        # (weak) icon match for item rules rather than being skipped. flip this on to restore the
+        # old strict behavior where an unread node is skipped (config weak_match_fallback=False).
+        self.skip_weak_var = ctk.BooleanVar(
+            value=not bool(cfg.get("weak_match_fallback", True)))
+        ctk.CTkSwitch(form, text="Skip nodes when a weak match's OCR read fails (no icon fallback)",
+                      variable=self.skip_weak_var).grid(
+            row=12, column=0, columnspan=2, sticky="w", padx=theme.PAD, pady=(4, theme.PAD))
+
         # keybinds
         ctk.CTkLabel(form, text="Start / pause hotkey", anchor="w").grid(
             row=1, column=0, sticky="w", padx=theme.PAD, pady=4)
@@ -59,13 +83,11 @@ class SettingsScreen(ctk.CTkFrame):
             command=lambda: self._capture_key("kill_key", self.kill_btn))
         self.kill_btn.grid(row=2, column=1, sticky="w", padx=theme.PAD, pady=4)
 
-        # matching method (CNN is shown but not selectable yet)
+        # matching method (cnn is the default learned matcher; ncc/ncc_masked/phash are classical)
         ctk.CTkLabel(form, text="Matching method", anchor="w").grid(
             row=3, column=0, sticky="w", padx=theme.PAD, pady=4)
-        self.matcher = ctk.CTkOptionMenu(
-            form, width=180, values=list(detect.MATCHERS) + [CNN_PLACEHOLDER],
-            command=self._on_matcher)
-        self.matcher.set(cfg.get("matcher", "ncc"))
+        self.matcher = ctk.CTkOptionMenu(form, width=180, values=list(detect.MATCHERS))
+        self.matcher.set(cfg.get("matcher", "cnn"))
         self.matcher.grid(row=3, column=1, sticky="w", padx=theme.PAD, pady=4)
 
         # binarization method (the thresholding find_circles preprocesses with)
@@ -114,6 +136,10 @@ class SettingsScreen(ctk.CTkFrame):
             self.app.app_state.config["debug"] = bool(self.debug_var.get())
         self.app.refresh_nav()
 
+    def on_show(self):
+        # picks up a debug change made on the Run screen since this screen was built.
+        self.debug_var.set(bool((self.app.app_state.config or {}).get("debug", False)))
+
     def _on_tooltips_toggle(self):
         # apply live (the gate is a module flag) so hovering reflects the switch before Save.
         on = bool(self.tooltips_var.get())
@@ -121,10 +147,14 @@ class SettingsScreen(ctk.CTkFrame):
             self.app.app_state.config["show_tooltips"] = on
         tooltip.set_enabled(on)
 
-    def _on_matcher(self, value):
-        if value == CNN_PLACEHOLDER:  # not built yet -> bounce back to the previous real matcher
-            self.matcher.set(self.app.app_state.config.get("matcher", "ncc"))
-            messagebox.showinfo("not available", "the CNN matcher is not implemented yet.")
+    def _on_pool_exclusive(self):
+        # exclusive is a strict subset of inferred, so when it's on we force inferred on and disable
+        # its switch (you can't have the priority-only pool without the inferred narrowing implied).
+        if bool(self.pool_exclusive_var.get()):
+            self.pool_inferred_var.set(True)
+            self.pool_inferred_sw.configure(state="disabled")
+        else:
+            self.pool_inferred_sw.configure(state="normal")
 
     def _capture_key(self, which, btn):
         """capture the next keypress as the hotkey for `which`, storing its keysym (e.g. 'f8')."""
@@ -154,6 +184,11 @@ class SettingsScreen(ctk.CTkFrame):
         cfg["thresh_method"] = self.thresh.get()
         cfg["node_finder"] = self.node_finder.get()
         cfg["show_tooltips"] = bool(self.tooltips_var.get())
+        cfg["pool_exclusive"] = bool(self.pool_exclusive_var.get())
+        # exclusive implies inferred (it forces it on in the ui), so persist that coupling too
+        cfg["pool_inferred"] = bool(self.pool_inferred_var.get()) or cfg["pool_exclusive"]
+        # switch is worded as the skip behavior, so it's the inverse of the fallback flag
+        cfg["weak_match_fallback"] = not bool(self.skip_weak_var.get())
         for key, entry, label in (("settle_s", self.settle, "settle wait"),
                                   ("ocr_hover_s", self.hover, "OCR tooltip wait"),
                                   ("advance_s", self.advance, "level transition wait")):

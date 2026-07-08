@@ -32,9 +32,10 @@ class _QueueWriter:
 
 
 class RunController:
-    def __init__(self, rows, log_queue, config):
+    def __init__(self, rows, log_queue, config, frame_sink=None):
         self.rows = rows
         self.log_queue = log_queue
+        self.frame_sink = frame_sink  # debug screen's push_frame, or None
         # arm once: keys come from the config present at creation (rebinds need a restart to re-arm,
         # but the on-screen buttons always work).
         self.switch = spender.Switch(
@@ -46,8 +47,20 @@ class RunController:
     def _build_source(self, config, sim):
         if sim:
             return spender.sim_source(self.rows, seed=0, low_conf_frac=0.2, discrepancy_frac=0.1)
-        matcher = config.get("matcher", "ncc")
+        matcher = config.get("matcher", "cnn")
         ncc = detect.load_ncc_templates(self.rows) if matcher.startswith("ncc") else None
+        # narrow the match library to the priority list's icons/sources, same as spender.main's cli
+        # path; without this a ui-launched run compares every killer's add-ons on a survivor web
+        # (the luckless-mouse-on-a-survivor-run bug). snapshotted at start, like the cli.
+        row_pool = spender.build_pool_mask(
+            self.rows, config.get("priorities", []),
+            inferred=config.get("pool_inferred", True),
+            exclusive=config.get("pool_exclusive", False),
+        )
+        if row_pool is not None:
+            self.log_queue.put(
+                f"pool: matching against {sum(row_pool)}/{len(self.rows)} library icons "
+                f"({'priority-only' if config.get('pool_exclusive') else 'priority-inferred'})")
         return spender.live_source(
             self.rows, ncc, matcher=matcher,
             thresh_method=config.get("thresh_method", "adaptive_gaussian"),
@@ -55,7 +68,7 @@ class RunController:
             auto_crop=config.get("auto_crop", True),
             web_bbox=config.get("web_bbox"),
             crop_pad_frac=config.get("crop_pad_frac", ocr.CROP_PAD_FRAC),
-            debug=config.get("debug", False),
+            debug=config.get("debug", False), row_pool=row_pool,
         )
 
     def start(self, config, sim, dry_run):
@@ -77,7 +90,7 @@ class RunController:
         sys.stdout = _QueueWriter(self.log_queue)  # tee the loop's prints into the ui log
         try:
             spender.run(source, config, self.switch, self.rows, click=click,
-                        debug=config.get("debug", False))
+                        debug=config.get("debug", False), frame_sink=self.frame_sink)
         except Exception as e:
             self.log_queue.put(f"run error: {type(e).__name__}: {e}")
         finally:

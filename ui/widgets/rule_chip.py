@@ -2,8 +2,10 @@
 
 two shapes: an item rule (thumbnail + name + a rarity badge you can toggle between the pinned rarity
 and "any rarity of this item") and a category rule (a text label like "any ultra rare item"). both
-carry a remove (x) and a pair of up/down arrows that move the rule into the adjacent tier. the chip
-never mutates the rule itself; it calls back to the tier list, which owns the model.
+carry a remove (x) and a pair of up/down arrows on the right that move the rule into the adjacent
+tier. in an ordered tier the chip also shows a leading rank badge and a second pair of up/down arrows
+on the left that reorder the rule within its own tier (top = first pick). the chip never mutates the
+rule itself; it calls back to the tier list, which owns the model.
 """
 
 import customtkinter as ctk
@@ -18,7 +20,8 @@ def _category_text(rule):
 
 
 class RuleChip(ctk.CTkFrame):
-    def __init__(self, master, rule, library, on_remove, on_toggle_rarity, on_move=None):
+    def __init__(self, master, rule, library, on_remove, on_toggle_rarity, on_move=None,
+                 rank=None, on_reorder=None):
         # ctk 6.x: fix the height in the constructor + stop propagation, else the accent CTkFrame
         # (200px default) blows the chip up and the tier list eats the whole pane.
         super().__init__(master, height=CHIP_H, corner_radius=6)
@@ -30,15 +33,36 @@ class RuleChip(ctk.CTkFrame):
                                    fg_color=rarity_color(rar))
         self.accent.pack(side="left", fill="y")
 
+        # ordered-tier controls (left side): a within-tier rank badge + up/down that reorder the
+        # rule inside this tier. only present when the tier is ordered (rank/on_reorder given), so a
+        # random tier's chips stay uncluttered. distinct from the right-side cross-tier arrows.
+        if rank is not None:
+            badge = ctk.CTkLabel(self, text=str(rank), width=16, font=FONT_SMALL)
+            badge.pack(side="left", padx=(4, 0))
+            bind_tooltip([badge], lambda: "within-tier rank (top = picked first)")
+        if on_reorder is not None:
+            up_in = ctk.CTkButton(self, text="▲", width=18, font=FONT_SMALL,
+                                  command=lambda: on_reorder(self.rule, -1))
+            up_in.pack(side="left", padx=(2, 0))
+            dn_in = ctk.CTkButton(self, text="▼", width=18, font=FONT_SMALL,
+                                  command=lambda: on_reorder(self.rule, 1))
+            dn_in.pack(side="left", padx=(2, 4))
+            bind_tooltip([up_in], lambda: "move up within this tier")
+            bind_tooltip([dn_in], lambda: "move down within this tier")
+
         # right cluster, far right first: [x] then the up/down arrows so it reads "▲ ▼ x".
         # up/down move the rule into the tier above/below (no-op at the ends).
         ctk.CTkButton(self, text="x", width=24, font=FONT_SMALL,
                       command=lambda: on_remove(self.rule)).pack(side="right", padx=(2, PAD))
         if on_move is not None:
-            ctk.CTkButton(self, text="▼", width=22, font=FONT_SMALL,
-                          command=lambda: on_move(self.rule, 1)).pack(side="right", padx=2)
-            ctk.CTkButton(self, text="▲", width=22, font=FONT_SMALL,
-                          command=lambda: on_move(self.rule, -1)).pack(side="right", padx=2)
+            dn_out = ctk.CTkButton(self, text="▼", width=22, font=FONT_SMALL,
+                                   command=lambda: on_move(self.rule, 1))
+            dn_out.pack(side="right", padx=2)
+            up_out = ctk.CTkButton(self, text="▲", width=22, font=FONT_SMALL,
+                                   command=lambda: on_move(self.rule, -1))
+            up_out.pack(side="right", padx=2)
+            bind_tooltip([up_out], lambda: "move to the tier above")
+            bind_tooltip([dn_out], lambda: "move to the tier below")
 
         if rule.get("type") == "item":
             row = library.lookup_row(rule.get("name", ""))

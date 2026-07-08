@@ -31,10 +31,10 @@ class PrioritiesScreen(ctk.CTkFrame):
         cfg = self.app.app_state.config or {}
         # profiles: named priority lists (config_io.ensure_profiles guarantees these exist). the tier
         # editor always edits the active profile; switching stashes the current edits back first.
-        self.profiles = {n: [list(t) for t in tiers]
+        self.profiles = {n: spender.copy_tiers(tiers)
                          for n, tiers in (cfg.get("profiles") or {}).items()}
         if not self.profiles:
-            self.profiles = {config_io.DEFAULT_PROFILE: list(cfg.get("priorities", []))}
+            self.profiles = {config_io.DEFAULT_PROFILE: spender.copy_tiers(cfg.get("priorities", []))}
         self.active = cfg.get("active_profile") or next(iter(self.profiles))
 
         self.grid_columnconfigure(0, weight=1)
@@ -246,9 +246,10 @@ class PrioritiesScreen(ctk.CTkFrame):
     def _save(self):
         self._stash_current()
         cfg = dict(self.app.app_state.config or {})
-        # tidy each profile (drop empty tiers) for the persisted file; mirror the active one into
-        # top-level `priorities` so the engine/cli keep reading the right list.
-        cfg["profiles"] = {name: [list(t) for t in tiers if t]
+        # tidy each profile (drop tiers with no rules) for the persisted file; mirror the active one
+        # into top-level `priorities` so the engine/cli keep reading the right list. tiers stay in
+        # canonical shape here; spender.save_config serializes them to the compact on-disk form.
+        cfg["profiles"] = {name: [spender.copy_tier(t) for t in tiers if spender.tier_rules(t)]
                            for name, tiers in self.profiles.items()}
         cfg["active_profile"] = self.active
         cfg["priorities"] = cfg["profiles"].get(self.active, [])
@@ -258,7 +259,7 @@ class PrioritiesScreen(ctk.CTkFrame):
             messagebox.showerror("invalid priorities", str(e))
             return
         self.app.app_state.config = cfg
-        self.profiles = {name: [list(t) for t in tiers]
+        self.profiles = {name: spender.copy_tiers(tiers)
                          for name, tiers in cfg["profiles"].items()}
         self._set_dirty(False)
 
@@ -267,10 +268,10 @@ class PrioritiesScreen(ctk.CTkFrame):
         if self.app.app_state.config_error:
             messagebox.showerror("config error", self.app.app_state.config_error)
         cfg = self.app.app_state.config or {}
-        self.profiles = {n: [list(t) for t in tiers]
+        self.profiles = {n: spender.copy_tiers(tiers)
                          for n, tiers in (cfg.get("profiles") or {}).items()}
         if not self.profiles:
-            self.profiles = {config_io.DEFAULT_PROFILE: list(cfg.get("priorities", []))}
+            self.profiles = {config_io.DEFAULT_PROFILE: spender.copy_tiers(cfg.get("priorities", []))}
         self.active = cfg.get("active_profile") or next(iter(self.profiles))
         self._refresh_profile_menu()
         self.tiers.set_tiers(self.profiles[self.active])

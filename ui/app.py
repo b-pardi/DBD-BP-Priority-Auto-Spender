@@ -180,6 +180,9 @@ class App(ctk.CTk):
 
     def show(self, key):
         """raise a screen and highlight its nav button."""
+        on_show = getattr(self.screens[key], "on_show", None)
+        if callable(on_show):
+            on_show()  # let a screen resync widgets from config before it's shown (e.g. debug toggle)
         self.screens[key].tkraise()
         self._active = key
         for k, b in self.nav_buttons.items():

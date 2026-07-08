@@ -3,8 +3,7 @@
 pydirectinput over pyautogui: dbd ignores pyautogui's synthesized events, while pydirectinput sends hardware-level input (SendInput) the game actually picks up.
 a buy might be a tap or a press-and-hold, so click_node presses for hold_s seconds and we tune that live.
 
-coords here are absolute screen coords with origin at the primary monitor's top-left.
-that is also pydirectinput's absolute-coord origin, since it normalizes against the primary monitor size only, so it reliably targets the primary display where the bloodweb lives.
+coords here are absolute screen coords with origin at the primary monitor's top-left, which is also pydirectinput's absolute-coord origin (it normalizes against the primary monitor size only), so it reliably targets the display where the bloodweb lives.
 map detection's frame coords to screen coords first via capture.frame_to_screen.
 """
 
@@ -14,6 +13,12 @@ import pydirectinput
 # we own all the timing explicitly below (moves, press duration, settles), so drop pydirectinput's implicit per-call pause to avoid double-waiting.
 # failsafe is left on, so slamming the cursor into a screen corner aborts, a handy manual complement to the keyboard kill switch.
 pydirectinput.PAUSE = 0.02
+
+
+def get_position():
+    """current cursor position as (x, y) screen ints.
+    pydirectinput.position is a plain GetCursorPos wrapper without the failsafe decorator, so this is safe to call even with the cursor in a screen corner."""
+    return pydirectinput.position()
 
 
 def move_to(x, y, pause=0.02):

@@ -1,34 +1,38 @@
 """scrape dbd icon assets + metadata from deadbydaylight.wiki.gg into a local library.
 
-the whole detector leans on this: we identify on-screen bloodweb icons by matching them
-against these exact sprites. we pull every category (perks, items, addons, offerings,
-powers), even ones we'd never buy, so unwanted nodes still get identified instead of
-causing false matches.
+the whole detector leans on this: we identify on-screen bloodweb icons by matching them against
+these exact sprites. we pull every category (perks, items, addons, offerings, powers), even ones
+we'd never buy, so unwanted nodes still get identified instead of causing false matches.
 
-source is the mediawiki api (action=query&list=allimages) filtered by the wiki's icon
-filename prefixes. cargo tables aren't exposed on this wiki, but the prefixes are a
-reliable way to enumerate each category. rarity isn't in the file metadata, so it's pulled
-in the same pass from the wiki's rarity categories (item/addon/offering only; perks/powers
-have none and stay null). it's a soft cross-check; detection reads rarity live from the
-on-screen disk color.
+source is the mediawiki api (action=query&list=allimages) filtered by the wiki's icon filename
+prefixes (cargo tables aren't exposed here, but the prefixes reliably enumerate each category).
+rarity isn't in the file metadata, so it's pulled in the same pass from the wiki's rarity categories
+(item/addon/offering only; perks/powers have none and stay null). it's a soft cross-check; detection
+reads rarity live from the on-screen disk color.
 
-one pass does it all: download (or reuse cached) -> normalize+phash -> annotate rarity ->
-dedup -> write. just `python -m src.scraper`.
+one pass does it all: download (or reuse cached) -> normalize+phash -> annotate rarity -> dedup ->
+write. just `python -m src.scraper`.
 
 writes:
   data/icons/<category>/<key>.png   the raw sprite
   data/icons_index.json             one row per icon: key, name, category, rarity, obtainable,
-                                    desc, file, phash, url
+                                    role, owner, side, desc, file, phash, url
 
-obtainable ('normal'|'event'|'unavailable') + desc (the wiki lead-sentence tooltip) are pulled in
-the same pass: obtainability from the wiki's retired/event categories (+ powers by category), desc
-from the TextExtracts api. both let the ui hide glyphs you can't currently buy and show a hover
-description; detection ignores them.
+obtainable ('normal'|'event'|'unavailable') + desc (the wiki lead-sentence tooltip) are pulled in the
+same pass: obtainability from the wiki's retired/event categories (+ powers by category), desc from
+TextExtracts. both let the ui hide unbuyable glyphs and show a hover description; detection ignores them.
 
-the phash is precomputed here (via normalize_sprite, kept in sync with detect.normalize_glyph)
-so nearest-neighbor lookup at detect time is a cheap hamming distance over ~2k templates,
-instead of full template matching on every candidate. if the framing changes on either side,
-re-run the scrape to recompute hashes from the cached pngs, no re-download needed.
+owner + side are filled last (they read the desc): an add-on's `owner` is the item type or killer
+power it belongs to, parsed from its lead sentence ('... Add-on for Med-Kits.'), and `side` is
+'survivor' | 'killer' | None for which bloodweb it shows up in. together they let the spender narrow
+the match pool to the priority list's sources (see node.build_pool_mask); the survivor item types
+that split a survivor add-on from a killer one are scraped from the Survivors article, not hardcoded,
+so a new item type is picked up automatically. detection ignores both.
+
+the phash is precomputed here (via normalize_sprite, kept in sync with detect.normalize_glyph) so
+nearest-neighbor lookup at detect time is a cheap hamming distance over ~2k templates instead of full
+template matching per candidate. if framing changes on either side, re-run the scrape to recompute
+hashes from the cached pngs, no re-download needed.
 """
 
 from __future__ import annotations
@@ -53,11 +57,10 @@ from .node import dedup_index_rows
 
 API = "https://deadbydaylight.wiki.gg/api.php"
 
-# wiki icon filename prefix -> our category name. these prefixes are how the wiki
-# namespaces its sprite files, so they double as a clean way to enumerate each category.
-# the wiki also files some newer/special assets under an inconsistent 'Icons' (extra s)
-# prefix, so we enumerate those too or we'd silently miss them (the gold event offerings,
-# plus a batch of newer perks).
+# wiki icon filename prefix -> our category name; the prefixes namespace the sprite files, so they
+# double as a clean way to enumerate each category. the wiki also files some newer/special assets
+# under an inconsistent 'Icons' (extra s) prefix, so we enumerate those too (gold event offerings,
+# plus a batch of newer perks) or we'd silently miss them.
 PREFIXES = {
     "IconPerks_": "perk",
     "IconItems_": "item",
@@ -68,16 +71,15 @@ PREFIXES = {
     "IconsPerks_": "perk",        # Icons-variant prefix: newer perks missing from IconPerks_
 }
 
-# prefixes whose icons are the gold "event" disk tier -- they carry no wiki rarity category,
-# so tag them 'event' directly (lets the soft cross-check + priority rules target them).
+# prefixes whose icons are the gold "event" disk tier; they carry no wiki rarity category, so tag
+# them 'event' directly (lets the soft cross-check + priority rules target them).
 EVENT_PREFIXES = {"IconsFavors_"}
 
-# event icons the curated Icon* prefixes don't cover: the newest event content is only on the
-# wiki as raw 'T_UI_' texture uploads (no curated IconItems_ redirect yet), so the prefix
-# enumeration never sees it. list those explicitly -- by exact File: name -> (key, category) --
-# because the in-game names ('Banquet ...') don't derive from the texture stem, and identity is
-# read from the glyph so the key is just a stable id. all are tagged 'event'. add a line per new
-# event icon, then re-scrape to fetch + hash them. (the 2026 10th-anniversary "Black Banquet".)
+# event icons the curated Icon* prefixes don't cover: the newest event content is on the wiki only as
+# raw 'T_UI_' texture uploads (no curated IconItems_ redirect yet), so prefix enumeration never sees
+# it. list those explicitly by exact File: name -> (key, category), since the in-game names
+# ('Banquet ...') don't derive from the texture stem (identity is read from the glyph, so the key is
+# just a stable id). all tagged 'event'; add a line per new event icon and re-scrape to fetch + hash.
 EXTRA_EVENT_ICONS = {
     "T_UI_iconItems_toolbox_anniversary2026.png":     ("banquetToolbox",   "item"),
     "T_UI_iconItems_flashlight_anniversary2026.png":  ("banquetFlashlight", "item"),
@@ -98,21 +100,20 @@ RARITY_WORDS = ["Common", "Uncommon", "Rare", "Very Rare", "Ultra Rare"]
 RARITY_TYPES = {"item": "Items", "addon": "Add-ons", "offering": "Offerings"}
 
 # obtainability: which scraped glyphs can still turn up in a current bloodweb. three states:
-# 'unavailable' (never, or no longer), 'event' (only while its event runs), 'normal' (always).
-# the wiki marks this through categories, not a single flag, so we read two sets:
-#   retired -> gone for good. only offerings have a retired category; there's no Retired Items/
-#   Add-ons (base content gets reworked, not removed), so that's the only one worth pulling.
-#   event   -> event-only skins/rewards (the masquerade med-kit, ghastly gateau, ...).
-# powers are the third case and need no wiki call: they're the only non-bloodweb icon category,
-# so they're flagged 'unavailable' by category when each row is built. retired wins over event.
+# 'unavailable' (never/no longer), 'event' (only while its event runs), 'normal' (always).
+# the wiki marks this through categories, not one flag, so we read two sets:
+#   retired -> gone for good; only offerings have a retired category (base content gets reworked not
+#              removed, so there's no Retired Items/Add-ons worth pulling).
+#   event   -> event-only skins/rewards (masquerade med-kit, ghastly gateau, ...).
+# powers need no wiki call: the only non-bloodweb category, flagged 'unavailable' by category at row
+# build. retired wins over event.
 RETIRED_CATEGORIES = ["Retired Offerings"]
 EVENT_CATEGORIES = ["Event Items", "Event Add-ons", "Event Offerings"]
 
-# role: which side plays a glyph, for the ui's killer/survivor filter. only perks carry a clean
-# wiki role category (the unique character perks plus the small general pool); items are always
-# survivor and powers always killer, so those are by category. add-ons and offerings have no role
-# category on the wiki (and most offerings suit either side), so they stay null = shown for both
-# roles in the ui. like rarity/obtainability this is a soft ui hint; detection ignores it.
+# role: which side plays a glyph, for the ui's killer/survivor filter. only perks carry a clean wiki
+# role category; items are always survivor and powers always killer (by category). add-ons and
+# offerings have no role category (most offerings suit either side), so they stay null = shown for
+# both roles. like rarity/obtainability, a soft ui hint; detection ignores it.
 PERK_ROLE_CATEGORIES = {
     "survivor": ["Survivor Perks", "Unique Survivor Perks"],
     "killer":   ["Killer Perks", "Unique Killer Perks"],
@@ -188,9 +189,9 @@ def normalize_sprite(img: Image.Image) -> Image.Image:
     on black. phash squishes whatever it gets to 32x32, so what makes two hashes comparable is
     identical framing (aspect + centering), not the source size.
 
-    kept in sync with detect.normalize_glyph by hand on purpose -- the two sides do different
-    cleanup (detect removes the disk, handles off-center crops) but must agree on this final
-    framing. returns an 'L' (grayscale) image ready to phash.
+    kept in sync with detect.normalize_glyph by hand on purpose (the two sides do different cleanup,
+    detect removes the disk and handles off-center crops, but must agree on this final framing).
+    returns an 'L' (grayscale) image ready to phash.
     """
     bbox = img.getbbox()                       # glyph extent (alpha-aware); None if fully blank
     glyph = img.crop(bbox) if bbox else img
@@ -271,6 +272,8 @@ def _index_one(session, url, key, name, category, rarity, obtainable, role,
         "rarity": rarity,
         "obtainable": obtainable,            # 'normal' | 'event' | 'unavailable' (see _obtainable)
         "role": role,                        # 'killer' | 'survivor' | None (see _role)
+        "owner": None,                       # add-on's item type / killer power, filled by fill_sources
+        "side": None,                        # 'survivor' | 'killer' | None, filled by fill_sources
         "desc": "",                          # wiki lead sentence, filled by fill_descriptions
         # relative to the index file so the library stays portable; detect resolves it
         # against index_path.parent
@@ -329,6 +332,10 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
 
     # fill the wiki lead-sentence tooltips in one batched pass now that every row's name is known
     fill_descriptions(session, index)
+
+    # owner + side, last: owner is parsed from the add-on lead sentence (so it needs desc filled
+    # first), and the survivor item types that classify an add-on's side are scraped live here.
+    fill_sources(index, fetch_survivor_item_types(session))
 
     if dedup:
         index = dedup_index_rows(index)
@@ -415,6 +422,70 @@ def _role(category, name, rolemap):
     return None
 
 
+# the wiki article whose item table enumerates every survivor item TYPE (Flashlights, Med-Kits,
+# ...). we read it to tell a survivor add-on from a killer one without a hardcoded list, so a new
+# item type is picked up automatically on the next scrape (see fetch_survivor_item_types).
+SURVIVOR_ITEMS_PAGE = "Survivors"
+
+
+def fetch_survivor_item_types(session):
+    """set of normalized survivor item-type names (flashlights, medkits, toolboxes, ...), read from
+    the Survivors article's 'List of Survivor Items' table.
+    an add-on is survivor-side when its owner (see _owner) is in this set, else a killer's. scraped
+    rather than hardcoded so a new item type needs no code change. returns an empty set if the
+    section/table isn't found, leaving add-on sides null (a safe non-narrowing default) rather than
+    failing the scrape."""
+    secs = session.get(API, params={
+        "action": "parse", "page": SURVIVOR_ITEMS_PAGE, "prop": "sections", "format": "json",
+    }, timeout=30).json().get("parse", {}).get("sections", [])
+    idx = next((s["index"] for s in secs if "survivor item" in s["line"].lower()), None)
+    if idx is None:
+        return set()
+    wt = session.get(API, params={
+        "action": "parse", "page": SURVIVOR_ITEMS_PAGE, "section": idx,
+        "prop": "wikitext", "format": "json",
+    }, timeout=30).json().get("parse", {}).get("wikitext", {}).get("*", "")
+    # each item type is a table header cell shaped '! [[Flashlights]] [[File:IconItems ...]]'
+    return {_norm(t) for t in re.findall(r"!\s*\[\[([^\]|]+?)\]\]\s*\[\[File:", wt)}
+
+
+def _owner(category, desc):
+    """the item type or killer power an add-on belongs to, normalized, parsed from its wiki lead
+    sentence ('Spring Clamp is an Uncommon Add-on for Toolboxes.' -> 'toolboxes'). only add-ons
+    carry an owner; everything else (and the ~5% of add-ons with no wiki page/desc) is None."""
+    if category != "addon":
+        return None
+    m = re.search(r"[Aa]dd-?on for ([^.]+)", desc or "")
+    return _norm(m.group(1)) if m else None
+
+
+def _side(category, owner, role, surv_types):
+    """which bloodweb side a row appears in, for the priority-inferred match pool:
+    'survivor' | 'killer' | None. items are survivor, powers killer, perks take their role, and an
+    add-on is survivor when its owner is a survivor item type else killer (None when the owner didn't
+    parse). offerings have no wiki side so stay None = shared, kept in the pool for either side."""
+    if category == "item":
+        return "survivor"
+    if category == "power":
+        return "killer"
+    if category == "perk":
+        return role
+    if category == "addon":
+        if owner is None:
+            return None
+        return "survivor" if owner in surv_types else "killer"
+    return None
+
+
+def fill_sources(rows, surv_types):
+    """populate each row's `owner` + `side` in place, run after fill_descriptions since owner comes
+    from the add-on lead sentence. a metadata-only pass (no downloads). these drive spender's
+    optional comparison-pool narrowing (node.build_pool_mask); detection itself ignores them."""
+    for r in rows:
+        r["owner"] = _owner(r["category"], r.get("desc"))
+        r["side"] = _side(r["category"], r["owner"], r.get("role"), surv_types)
+
+
 def fetch_page_titles(session):
     """every real (non-redirect) main-namespace article title, paged via list=allpages (500/call).
     used to resolve our prettified row names to the exact wiki page title for the description lookup:
@@ -469,21 +540,6 @@ def fill_descriptions(session, rows):
         r["desc"] = descmap.get(_norm(r["name"]), "")
 
 
-def annotate_roles(index_path: Path):
-    """add/refresh the `role` field on an existing index in place, no icon downloads.
-    a cheap metadata-only pass (a handful of perk-category calls) so the ui's killer/survivor filter
-    can be enabled without re-running the full scrape, which would also re-fetch every description.
-    re-dedups while it's here so a stale index also sheds the swapped-name duplicate uploads."""
-    rows = json.loads(index_path.read_text(encoding="utf-8"))
-    rolemap = fetch_perk_roles(_session())
-    for r in rows:
-        r["role"] = _role(r.get("category"), r.get("name"), rolemap)
-    rows = dedup_index_rows(rows)
-    rows.sort(key=lambda row: (row["category"], row["key"]))
-    index_path.write_text(json.dumps(rows, indent=2, ensure_ascii=False), encoding="utf-8")
-    return rows
-
-
 def main():
     ap = argparse.ArgumentParser(description="scrape dbd icons + metadata into a local library")
     ap.add_argument(
@@ -499,20 +555,7 @@ def main():
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--index", type=Path, default=DEFAULT_INDEX)
     ap.add_argument("--no-dedup", action="store_true", help="skip phash dedup during a scrape")
-    ap.add_argument(
-        "--roles-only", action="store_true",
-        help="only add/refresh the role field (+ re-dedup) on the existing index, no downloads"
-    )
     args = ap.parse_args()
-
-    # cheap metadata-only path: enable the ui killer/survivor filter without a full re-scrape.
-    if args.roles_only:
-        index = annotate_roles(args.index)
-        role = Counter(row.get("role") for row in index)
-        print(f"annotated roles on {len(index)} icons -> {args.index}")
-        print(f"role: {role.get('killer', 0)} killer, {role.get('survivor', 0)} survivor, "
-              f"{role.get(None, 0)} unset")
-        return
 
     # one pass: download (or reuse cached) -> normalize+phash -> annotate rarity -> dedup -> write
     index, skipped = scrape(
@@ -528,11 +571,14 @@ def main():
         print(f"  {cat:9} {n}{rar}")
     obt = Counter(row["obtainable"] for row in index)
     role = Counter(row.get("role") for row in index)
+    side = Counter(row.get("side") for row in index)
     described = sum(1 for row in index if row["desc"])
     print(f"obtainable: {obt.get('normal', 0)} normal, {obt.get('event', 0)} event, "
           f"{obt.get('unavailable', 0)} unavailable   |   {described} with a description")
     print(f"role: {role.get('killer', 0)} killer, {role.get('survivor', 0)} survivor, "
           f"{role.get(None, 0)} unset")
+    print(f"side: {side.get('killer', 0)} killer, {side.get('survivor', 0)} survivor, "
+          f"{side.get(None, 0)} shared/unknown")
     if skipped:
         print(f"skipped {len(skipped)} asset(s) that wouldn't decode after retries: {', '.join(skipped)}")
 

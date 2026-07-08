@@ -9,10 +9,10 @@ we never leak a clicking background thread.
 
 import tkinter as tk
 import tkinter.messagebox as messagebox
-from pathlib import Path
 
 import customtkinter as ctk
 
+from src import paths
 from . import config_io, scrape_runner, theme
 from .widgets import tooltip
 from .screens.priorities import PrioritiesScreen
@@ -20,7 +20,7 @@ from .screens.settings import SettingsScreen
 from .screens.run import RunScreen
 from .screens.debug import DebugScreen
 
-ASSETS = Path(__file__).resolve().parent / "assets"
+ASSETS = paths.resource_path("ui/assets")  # bundled read-only asset, _MEIPASS/ui/assets when frozen
 
 
 class AppState:

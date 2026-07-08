@@ -63,7 +63,8 @@ def debug_dir():
 def ensure_user_dirs():
     """create the writable dirs and, on first frozen run, seed the default config from the bundle.
     returns the resolved config path. a no-op in dev where the repo dirs already exist."""
-    for d in (config_path().parent, cache_dir(), debug_dir()):
+    # usr/ holds the evolving rarity-HSV anchors detect rewrites per web (detect.USR_HSV)
+    for d in (config_path().parent, cache_dir(), debug_dir(), user_base() / "usr"):
         d.mkdir(parents=True, exist_ok=True)
     cfg = config_path()
     if not cfg.exists():

@@ -53,6 +53,7 @@ from requests.adapters import HTTPAdapter
 from tqdm import tqdm
 from urllib3.util.retry import Retry
 
+from . import paths
 from .node import dedup_index_rows
 
 API = "https://deadbydaylight.wiki.gg/api.php"
@@ -87,10 +88,9 @@ EXTRA_EVENT_ICONS = {
     "T_UI_iconItems_poison_anniversary2026.png":      ("banquetPoison",    "item"),
 }
 
-# repo root is two levels up (src/scraper.py -> repo root), so defaults land in data/
-ROOT = Path(__file__).resolve().parent.parent
-DEFAULT_OUT = ROOT / "data" / "icons"
-DEFAULT_INDEX = ROOT / "data" / "icons_index.json"
+# first-run scrape writes here: cache_dir = repo data/ in dev, %APPDATA%/dbdbp/cache when frozen
+DEFAULT_OUT = paths.cache_dir() / "icons"
+DEFAULT_INDEX = paths.cache_dir() / "icons_index.json"
 
 # rarity comes from wiki categories: pages are tagged "<rarity> Items/Add-ons/Offerings".
 # only reliable source, since allimages carries no rarity and there are no cargo tables.

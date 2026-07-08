@@ -13,14 +13,13 @@ import cv2
 import numpy as np
 import imagehash
 from PIL import Image
-import matplotlib.pyplot as plt
 
 from . import paths
 from .resolution import Resolution
 
 ROOT = Path(__file__).resolve().parent.parent
-USR_HSV = ROOT / "usr" / "rarity-HSVs.json"         # active anchors, evolve per user each web
-DEFAULT_INDEX = ROOT / "data" / "icons_index.json"
+USR_HSV = paths.user_base() / "usr" / "rarity-HSVs.json"   # active anchors, evolve per web; user_base writable when frozen
+DEFAULT_INDEX = paths.cache_dir() / "icons_index.json"     # scraped library, cache_dir writable when frozen (first-run scrape)
 
 RARITIES = ["common", "uncommon", "rare", "very rare", "ultra rare", "event"]
 
@@ -1165,9 +1164,16 @@ def draw_detections(frame, nodes):
 # matplotlib, not cv2 highgui: the conda opencv build ships without a gui backend, and we
 # don't want highgui in the frozen exe anyway. matplotlib also gives zoom/pan for free and
 # maps clicks back to image coords even when zoomed, which the 3440x1440 frames need.
+def _plt():
+    # lazy import, debug draw only, so import detect and the frozen exe skip matplotlib
+    import matplotlib.pyplot as plt
+    return plt
+
+
 def _sample_window(fixture_path):
     """open a fixture and print the hsv under each click, how we read real disk colors to set/verify the rarity anchors.
     median over a small patch so one noisy pixel doesn't mislead."""
+    plt = _plt()
     img = cv2.imread(str(fixture_path))
     if img is None:
         raise FileNotFoundError(fixture_path)
@@ -1201,6 +1207,7 @@ def _show(
     img is a bgr frame OR a single-channel gray/edge/mask (ndim==2, promoted to bgr so overlays can be colored).
     contours is a list of cv2 contours (drawn), edges a binary single-channel map (nonzero pixels painted on), circles a list of (x, y, r) like find_circles returns (drawn as outline + center dot, floats cast to int).
     overlay colors are bgr, composited with cv2 onto a copy then handed to imshow."""
+    plt = _plt()
     # matplotlib clips float rgb to [0,1], so a scalar float map (e.g. the distance transform) sent through gray2bgr shows up solid white;
     # normalize any non-uint8 2d input to 0-255 first so its gradient is visible (binary uint8 masks pass through as-is)
     if img.ndim == 2 and img.dtype != np.uint8:
@@ -1236,6 +1243,7 @@ def _show_gallery(items, title="glyphs", cols=6, savefig=False):
     for eyeballing the per-node crops/normalized glyphs next to what they read as (rarity, socket, match), instead of the whole annotated frame.
     images are bgr or single-channel like everywhere else here; a None image draws a blank cell (e.g. normalize_glyph returned None).
     dev-only, matplotlib since this conda cv2 has no highgui backend."""
+    plt = _plt()
     items = [it for it in items]
     if not items:
         print("gallery: nothing to show")

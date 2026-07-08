@@ -130,6 +130,15 @@ class SettingsScreen(ctk.CTkFrame):
         ctk.CTkButton(self, text="Save settings", command=self._save).pack(
             anchor="w", padx=theme.PAD, pady=theme.PAD)
 
+        # wiki attribution: icon art, names, and descriptions used for training and shown here come
+        # from deadbydaylight.wiki.gg. unofficial fan tool, not affiliated with Behaviour Interactive.
+        ctk.CTkLabel(
+            self,
+            text=("icon data from deadbydaylight.wiki.gg, used for model training and shown in this ui.\n"
+                  "unofficial fan tool, not affiliated with Behaviour Interactive. game assets © Behaviour Interactive."),
+            font=theme.FONT_SMALL, text_color="gray", justify="left", anchor="w",
+        ).pack(side="bottom", anchor="w", padx=theme.PAD, pady=theme.PAD)
+
     def _on_debug_toggle(self):
         # write through immediately so the Debug nav button can appear/disappear right away.
         if self.app.app_state.config is not None:

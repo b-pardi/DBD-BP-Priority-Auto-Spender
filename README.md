@@ -54,6 +54,7 @@ present it clicks the center auto-spend to finish the level and move on.
 - [ ] auto pause when detecting bloodweb no longer visible
 - [ ] ui drag and drop priority elements
 
+
 ## Setup
 
 uses a conda env named `dbdbp`
@@ -65,6 +66,12 @@ Anaconda recommended:
 One can use a python venv with version 3.11 and download all the pkgs in `environment.yml`, using special care when it comes to [pytesseroc](https://pypi.org/project/tesserocr/)
 
 Note in either case, the Tesseract binary is _not_ required to be installed system wide, pytesseroc is cool and nice and comes with the tesseract C bins (hence the special attention to installing it for your specific windows platform).
+
+## Known Bugs
+
+- Zooming in/out in debug screenshot
+- kill/pause switch doesn't kill or pause til current web is done
+- ui is slow as shit
 
 ## layout
 
@@ -117,6 +124,7 @@ python -m ui
 
 - Grabs the screen, then auto crops down to just the bloodweb using a couple bits of OCR'd anchor text so UI buttons and other screen junk can't get mistaken for nodes.
 - Binarizes the crop and finds node shaped blobs, then figures out each one's rarity from the color of its disk and its item/perk/addon type from the socket outline.
+    - fuck you event items in particular
 - Turns out every bloodweb is secretly the same fixed 30 slot ring layout no matter what's in it, so detection now fits that lattice to the frame and snaps candidates onto it. This single fact would have saved an embarrassing number of weekends fighting almost circular blobs that were actually just shadows.
 - The center node gets found separately by its red glow, since it's the auto spend fallback and never something we buy on purpose.
 
@@ -124,9 +132,10 @@ python -m ui
 
 - Crops out just the little icon glyph sitting inside each node, blurry JPEG artifacts and all.
 - The real matcher is a small CNN that learns to squish that ugly extracted glyph and the clean wiki sprite into the same neighborhood of embedding space, then it's just nearest neighbor lookup against a cached bank of every icon's embedding.
-- Classical approaches (pHash, plain NCC, masked NCC) all got tried first and all capped out around the mid 50s to low 60s percent on real screenshots, which is a nice way of saying they weren't good enough and something smarter was unavoidable.
-- Training that CNN needed a pile of labeled examples nobody was going to hand label, so there's a synthetic glyph generator that renders fake nodes and puts them through the exact same crop and degrade pipeline the live detector uses, just to manufacture something realistic enough to learn from. Genuinely one of the more soul crushing parts of this whole project.
-- When the matcher still isn't confident enough, it falls back to hovering the node and OCR'ing the tooltip that pops up. Slower, but basically never wrong.
+- Classical approaches (pHash, plain NCC, masked NCC) all got tried first and all capped out around the mid 50s to low 60s percent on real screenshots, which meant designing a model and full synthetic bloodweb node generation pipeline, but whatever.
+- Training that CNN needed thousands of labeled examples I sure as hell wasn't gonna annotate all of, so there's a synthetic glyph generator that renders fake nodes and puts them through the exact same crop and degrade pipeline the live detector uses, just to manufacture something realistic enough to learn from. Genuinely one of the more soul crushing parts of this whole project was getting synthetic nodes to look like the real ones ffs.
+    - fuck you event items in particular _again_
+- When the matcher still isn't confident enough, it optionally falls back to hovering the node and OCR'ing the tooltip that pops up. Slower, but basically never wrong (except when it can't fucking read like me).
 
 #### Getting the wiki references
 
@@ -136,7 +145,7 @@ python -m ui
 
 ### Priority Selection
 
-- You write out tiers of rules in a JSON config, from specific items at a given rarity down to whole categories like "any offering".
+- You write out tiers of rules in a JSON config or enter in the UI from specific items at a given rarity down to whole categories like "any perk".
 - Each scan walks the list top to bottom and buys the first match it finds among the detected nodes, one buy per scan since DBD auto pathfinds to whatever you click anyway.
 - Once nothing on the list is present anymore it just hits the center auto spend and lets the level finish itself out.
 
@@ -145,11 +154,14 @@ python -m ui
 - MSS grabs the frames, mostly because it's a lot faster than PIL on Windows and speed matters when you're polling a game window.
 - pydirectinput drives the mouse so the game sees ordinary input rather than something obviously synthetic.
 - The cursor gets parked off in a corner between actions so it isn't just sitting on a node accidentally triggering a tooltip every time a scan runs.
-- A global hotkey kill switch cuts everything immediately, because sooner or later something will misbehave and you'll want a way out that doesn't involve alt tabbing in a panic.
+- A global hotkey kill switch cuts everything immediately (sort of, see known bugs above), so you can stop it before entering a game.
 
 ### Program Interface
 
 idk nothing special here it's a customtkinter python ui that I couldn't be fucked to make so claude did most and I just fixed its stuff.
 
-- Lets you build and reorder your priority tiers, tune all the detection and timing knobs, and pick a matcher without touching the JSON by hand.
-- A debug screen shows you what the detector's actually seeing frame by frame, with a zoom and a save button for whenever it inevitably sees something wrong and you need to know why.
+## Attribution / Disclaimer
+
+icon art, names, rarities, and descriptions come from [deadbydaylight.wiki.gg](https://deadbydaylight.wiki.gg). that data is used two ways: as reference material for training the glyph matching model, and shown directly in the ui so you can pick what to prioritize. big thanks to the wiki contributors, none of this works without them.
+
+the game assets themselves are © Behaviour Interactive. this is an unofficial fan tool, not affiliated with or endorsed by Behaviour Interactive or the wiki. no game files are bundled, the reference library is fetched from the wiki on first run.

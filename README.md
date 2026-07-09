@@ -49,11 +49,11 @@ everything else works the same as the dev instructions below: borderless dbd, dr
 - [ ] bloodweb prestige screen detection
 - [x] auto determine bbox for bloodweb frame crop.
 - [x] fix non-breaking UI bugs
-- [ ] add within tier priority selection
+- [x] add within tier priority selection
 - [ ] core functionality test code on fixtures
 - [ ] flush out documentation
     - [ ] add instructions tab to ui
-- [ ] update default settings and setup profile templates
+- [x] update default settings and setup profile templates
 - [x] bundle an exe
 
 #### Beta (some smart nice to have features)

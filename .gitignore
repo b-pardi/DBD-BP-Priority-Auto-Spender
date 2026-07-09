@@ -23,6 +23,10 @@ data/ring-template.npz
 tests/fixtures/*.png
 !tests/fixtures/.gitkeep
 
+# pyinstaller exe build output, fully regenerable from dbdbp.spec
+build/
+dist/
+
 # temp outputs/utils
 .tmp/
 .claude

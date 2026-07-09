@@ -11,6 +11,18 @@ present it clicks the center auto-spend to finish the level and move on.
 >
 > note: run dbd in borderless (windowed fullscreen), not exclusive fullscreen. exclusive fullscreen returns black screen-captures, can swallow the synthesized clicks, and blocks the global kill-switch hotkey. borderless looks identical and makes capture, clicking, and the f7/f8 hotkeys all work.
 
+## Running the app (packaged exe)
+
+grab the zip, extract the whole `dbdbp` folder somewhere, and run `dbdbp.exe` inside it. keep the folder together, the exe needs the files next to it.
+
+windows smartscreen will probably warn on first launch since the exe isn't code-signed (and it ships input-injection libs, which antivirus tends to flag). that's expected. click "more info" then "run anyway". if defender quarantines it, allow it.
+
+first launch has no icon library yet, so it'll offer to fetch the dead by daylight icons from the wiki. let it run once (a few minutes, shows a progress bar). after that it's cached and startup is fast.
+
+your config, the icon cache, and debug output live under `%APPDATA%\dbdbp` (not in the app folder), so you can move or replace the app folder without losing settings. deleting `%APPDATA%\dbdbp` resets it to a fresh install.
+
+everything else works the same as the dev instructions below: borderless dbd, dry-run is the default, f7 start / f8 kill.
+
 ## Status
 
 #### Pre-Alpha (earliest possible working version tuned for one setup)
@@ -42,7 +54,7 @@ present it clicks the center auto-spend to finish the level and move on.
 - [ ] flush out documentation
     - [ ] add instructions tab to ui
 - [ ] update default settings and setup profile templates
-- [ ] bundle an exe
+- [x] bundle an exe
 
 #### Beta (some smart nice to have features)
 - [ ] Entity aware node selection

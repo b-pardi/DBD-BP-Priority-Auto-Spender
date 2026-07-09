@@ -241,8 +241,17 @@ class DebugScreen(ctk.CTkFrame):
     def _scrape_worker(self, force):
         try:
             categories = sorted(set(scraper.PREFIXES.values()))
+            # log one line per stage change (not per icon) so the log shows progress without flooding
+            last = {"stage": None}
+
+            def on_progress(stage, cur=None, tot=None):
+                if stage != last["stage"]:
+                    last["stage"] = stage
+                    self.log(f"  {stage}" + (f" ({tot} items)" if tot else "…"))
+
             index, skipped = scraper.scrape(
-                categories, scraper.DEFAULT_OUT, scraper.DEFAULT_INDEX, force=force)
+                categories, scraper.DEFAULT_OUT, scraper.DEFAULT_INDEX, force=force,
+                progress=on_progress)
             self.log(f"scrape done: {len(index)} icons indexed"
                      + (f", {len(skipped)} skipped" if skipped else ""))
             # the index changed: drop the ncc cache + thumbnails + the loaded library so they rebuild.

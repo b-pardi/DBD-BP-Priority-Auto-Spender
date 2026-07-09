@@ -36,30 +36,56 @@ def run_scrape(app, force=False, on_done=None):
     on success, invalidates caches and calls on_done() on the main thread. returns the window."""
     win = ctk.CTkToplevel(app)
     win.title("Updating icon library")
-    win.geometry("440x150")
+    win.geometry("440x160")
     win.transient(app)
     win.protocol("WM_DELETE_WINDOW", lambda: None)  # no closing mid-scrape
     win.after(200, win.grab_set)  # CTkToplevel needs to be viewable before grabbing
     ctk.CTkLabel(
         win, justify="left",
-        text="Fetching icons from deadbydaylight.wiki.gg…\nThis can take a few minutes.",
-    ).pack(padx=16, pady=(18, 8), anchor="w")
-    bar = ctk.CTkProgressBar(win, mode="indeterminate")
+        text="Fetching icons from deadbydaylight.wiki.gg…",
+    ).pack(padx=16, pady=(18, 4), anchor="w")
+    bar = ctk.CTkProgressBar(win, mode="determinate")
+    bar.set(0)
     bar.pack(fill="x", padx=16, pady=8)
-    bar.start()
+    status = ctk.CTkLabel(win, justify="left", text="starting…", text_color="gray")
+    status.pack(padx=16, pady=(0, 8), anchor="w")
 
     result = {}
+    # latest progress, written by the worker thread's callback and read by poll() on the main
+    # thread (tk isn't thread-safe, so the worker never touches widgets, it just updates this dict).
+    prog = {"stage": "starting…", "cur": None, "tot": None}
+    mode = {"m": "det"}  # track the bar's current mode so we only switch it when it changes
+
+    def on_progress(stage, cur=None, tot=None):
+        prog.update(stage=stage, cur=cur, tot=tot)
 
     def worker():
         try:
             cats = sorted(set(scraper.PREFIXES.values()))
             index, skipped = scraper.scrape(
-                cats, scraper.DEFAULT_OUT, scraper.DEFAULT_INDEX, force=force)
+                cats, scraper.DEFAULT_OUT, scraper.DEFAULT_INDEX, force=force,
+                progress=on_progress)
             result["ok"] = (len(index), len(skipped))
         except Exception as e:
             result["err"] = f"{type(e).__name__}: {e}"
 
     def poll():
+        # reflect the latest progress each tick until the worker sets a result
+        cur, tot = prog["cur"], prog["tot"]
+        if tot:  # countable phase, show a real bar with the running count
+            if mode["m"] != "det":
+                bar.stop()
+                bar.configure(mode="determinate")
+                mode["m"] = "det"
+            bar.set(min(cur / tot, 1.0))
+            status.configure(text=f"{prog['stage']} ({cur}/{tot})")
+        else:    # phase with no known total (up-front fetches, writing), just pulse
+            if mode["m"] != "ind":
+                bar.configure(mode="indeterminate")
+                bar.start()
+                mode["m"] = "ind"
+            status.configure(text=f"{prog['stage']}…")
+
         if not result:
             win.after(150, poll)
             return

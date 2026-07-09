@@ -11,11 +11,9 @@ in-graph). the encoder keeps a 6x6 spatial grid instead of global-average-poolin
 discarded layout and only tied ncc before (matching-method-plan frozen-cnn lesson).
 
 subcommands:
-  smoke  -> random-weight encoder, export onnx, load via cv2.dnn, check torch<->onnx parity (the
-            de-risk gate, run BEFORE investing in training)
-  train  -> train + select on held-out synth + export best onnx; metrics persist to
-            <out>_metrics.json next to the model, flushed every eval
-  plot   -> render that json to <out>_metrics.png (loss + synth-val top1 curves)
+train: train + select on held-out synth + export best onnx; metrics persist to
+<out>_metrics.json next to the model, flushed every eval
+plot: render that json to <out>_metrics.png (loss + synth-val top1 curves)
 """
 
 import os

@@ -283,24 +283,35 @@ def _index_one(session, url, key, name, category, rarity, obtainable, role,
     }
 
 
-def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False, delay=0.1, dedup=True):
+def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False, delay=0.1,
+           dedup=True, progress=None):
+    # progress is an optional callback(stage, current, total), current/total None for phases with no
+    # countable work, so the ui can show a real bar instead of a spinner. cli passes nothing.
+    def _p(stage, cur=None, tot=None):
+        if progress:
+            progress(stage, cur, tot)
+
     session = _session()
     prefixes = {p: c for p, c in PREFIXES.items() if c in categories}
     # rarity in the same pass: pull the wiki's rarity categories once up front, then look each
     # icon up as we build its row, so one scrape yields a fully-populated index (no second pass).
     # only item/addon/offering have rarity categories, so skip the fetch unless one's selected.
+    _p("fetching rarity data")
     rmap = fetch_rarity_map(session) if any(c in RARITY_TYPES for c in categories) else {}
     # obtainability (retired/event sets) in the same up-front pass as rarity, so one scrape yields a
     # fully-annotated index. cheap (a few category calls); always pulled since any category can hold
     # event/retired glyphs and powers are flagged by category regardless.
+    _p("fetching obtainability data")
     obmap = fetch_obtainability(session)
     # role (killer/survivor) for the ui filter, same up-front-map pattern: only perks need the wiki
     # lookup, so skip the category calls unless perks are selected (items/powers go by category).
+    _p("fetching perk roles")
     rolemap = fetch_perk_roles(session) if "perk" in categories else {}
     index = []
     skipped = []
     for prefix, category in prefixes.items():
-        for entry in tqdm(list_icons(session, prefix, limit=limit), desc=category, unit="icon"):
+        icons = list_icons(session, prefix, limit=limit)
+        for i, entry in enumerate(tqdm(icons, desc=category, unit="icon")):
             key = Path(entry["name"][len(prefix):]).stem   # IconPerks_EyesOfBelmont.png -> EyesOfBelmont
             name = prettify(key)
             # event prefixes -> 'event' (gold tier, no wiki rarity category); else the wiki
@@ -312,11 +323,13 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
                              out_dir, index_path, force, delay, skipped)
             if row:
                 index.append(row)
+            _p(f"downloading {category}", i + 1, len(icons))
 
     # explicit event icons the prefixes miss (raw T_UI_ textures); look them up by exact name
     # and tag 'event'. skip ones whose category wasn't requested so --categories stays honest.
     extras = {f: kc for f, kc in EXTRA_EVENT_ICONS.items() if kc[1] in categories}
     if extras:
+        _p("downloading event icons")
         extra_urls = resolve_image_urls(session, list(extras))
         for fname, (key, category) in extras.items():
             url = extra_urls.get(fname)
@@ -331,12 +344,14 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
                 index.append(row)
 
     # fill the wiki lead-sentence tooltips in one batched pass now that every row's name is known
-    fill_descriptions(session, index)
+    fill_descriptions(session, index, progress=progress)
 
     # owner + side, last: owner is parsed from the add-on lead sentence (so it needs desc filled
     # first), and the survivor item types that classify an add-on's side are scraped live here.
+    _p("fetching item sources")
     fill_sources(index, fetch_survivor_item_types(session))
 
+    _p("writing index")
     if dedup:
         index = dedup_index_rows(index)
     index.sort(key=lambda row: (row["category"], row["key"]))
@@ -505,14 +520,15 @@ def fetch_page_titles(session):
         cont = data["continue"]
 
 
-def fetch_descriptions(session, titles):
+def fetch_descriptions(session, titles, progress=None):
     """{normalized_name: lead_sentence} for the given wiki page titles, via the TextExtracts api.
     the lead is the wiki's one-line classifier (e.g. 'Spring Clamp is an Uncommon Add-on for
     Toolboxes.'), shown as a hover tooltip in the ui. the real effect text isn't reachable from the
     api (it's lua-rendered into the page html), so the lead sentence is all we keep. batch in 20s:
     exlimit caps at 20 for extracts, and a bigger batch silently returns empty for the overflow."""
     out = {}
-    for i in range(0, len(titles), 20):
+    nbatch = (len(titles) + 19) // 20
+    for bi, i in enumerate(range(0, len(titles), 20)):
         batch = titles[i:i + 20]
         data = session.get(API, params={
             "action": "query", "format": "json", "prop": "extracts",
@@ -523,19 +539,23 @@ def fetch_descriptions(session, titles):
             ex = (pg.get("extract") or "").strip().replace("\n", " ")
             if ex:
                 out[_norm(pg["title"])] = ex
+        if progress:
+            progress("fetching descriptions", bi + 1, nbatch)
     return out
 
 
-def fill_descriptions(session, rows):
+def fill_descriptions(session, rows, progress=None):
     """populate each row's `desc` in place by matching its name to a real wiki title (via
     fetch_page_titles) and pulling that page's lead sentence. one batched pass over the whole index
     after the rows are built; rows with no matching article (powers' internal icon names, a few
     event items) keep an empty desc."""
+    if progress:
+        progress("fetching page titles", None, None)
     norm2title = {}
     for title in fetch_page_titles(session):
         norm2title.setdefault(_norm(title), title)
     needed = sorted({norm2title[_norm(r["name"])] for r in rows if _norm(r["name"]) in norm2title})
-    descmap = fetch_descriptions(session, needed)
+    descmap = fetch_descriptions(session, needed, progress=progress)
     for r in rows:
         r["desc"] = descmap.get(_norm(r["name"]), "")
 

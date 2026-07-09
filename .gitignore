@@ -27,6 +27,9 @@ tests/fixtures/*.png
 build/
 dist/
 
+# packaged release zips are uploaded as github release assets, not committed
+*.zip
+
 # temp outputs/utils
 .tmp/
 .claude

@@ -33,6 +33,7 @@ KILL_KEY = "f8"      # dedicated always-stop panic hotkey, only ever stops, neve
 START_KEY = "f7"     # start/pause toggle, idle -> running -> paused -> running
 SETTLE_S = 0.6       # post-buy wait before the rescan, tune live like input_control.hold_s
 ADVANCE_S = 3.0      # post-auto-spend wait for the fill + level transition to play out
+PRESTIGE_WAIT_S = 5.0  # post-prestige-click wait for the animation before the rewards OK button appears
 IDLE_POLL_S = 0.05   # how often the loop re-checks the switch while idle or paused
 REPICK_TOL_PX = 20   # spot-match tolerance for the don't-repick guard, tune with node spacing
 PARK_TOL_PX = 25     # how far the cursor may drift from PARK_XY before a scan re-parks it
@@ -41,6 +42,17 @@ PARK_FADE_S = 0.5    # post-re-park wait for a hovered tooltip to fade before th
 DEFAULT_CONFIG = paths.config_path()   # frozen-aware: repo config/ in dev, %APPDATA%/dbdbp when frozen
 VALID_CATEGORIES = {"item", "addon", "offering", "perk", "power"}
 VALID_RARITIES = {"common", "uncommon", "rare", "very rare", "ultra rare", "event"}
+
+# rough per-node bloodpoint cost by rarity, for the bp-floor stop's mid-web estimate. dbd's real cost
+# also drifts with the web-level bracket, but the user asked for a rarity-only approximation and an
+# imprecise stop, so these are round averages (override via config 'rarity_bp_cost' if a run drifts).
+RARITY_BP_COST = {
+    "common": 3000, "uncommon": 3250, "rare": 3500,
+    "very rare": 4500, "ultra rare": 6000, "event": 4000,
+}
+DEFAULT_NODE_COST = 3500   # fallback for an unknown/None rarity
+
+PRESTIGE_LEVEL = 50   # the bloodweb level at which the center becomes the prestige star
 # win32 global-hotkey plumbing for the run control. RegisterHotKey reserves the key system-wide and
 # posts WM_HOTKEY to our own message loop, so it fires no matter which window has focus (including a
 # foreground dbd we're clicking in); the old keyboard-lib hook only landed while the terminal had
@@ -214,6 +226,14 @@ def load_config(path=None):
 
     cfg.setdefault("dry_run", True)
     cfg.setdefault("stop_bp_threshold", 0)
+    # auto-prestige at bloodweb level 50 (click the star, dismiss the rewards screen, keep going).
+    # off by default: prestiging spends 20k bp and resets the character, so it's opt-in.
+    cfg.setdefault("auto_prestige", False)
+    cfg.setdefault("prestige_wait_s", PRESTIGE_WAIT_S)  # click star -> wait -> rewards OK appears
+    # level goal-stop: stop once the character reaches this (prestige, bloodweb level). 0 disables a
+    # component. stop_prestige with stop_level 0 means "stop the moment that prestige is reached".
+    cfg.setdefault("stop_prestige", 0)
+    cfg.setdefault("stop_level", 0)
     # comparison-pool narrowing (see node.build_pool_mask): inferred (each priority item's whole
     # bloodweb source) on by default, exclusive (only the listed icons) off. exclusive is a subset
     # of inferred, so the ui keeps inferred forced on whenever exclusive is set.
@@ -435,6 +455,65 @@ def _pick_note(node):
     return f" [tier {node.pick_tier} random]"
 
 
+def _node_cost(node, cost_table):
+    """approximate bloodpoint cost of buying one node, by its (disk-read) rarity."""
+    return cost_table.get(node.rarity, DEFAULT_NODE_COST)
+
+
+def estimate_web_cost(nodes, cost_table=RARITY_BP_COST):
+    """rough total bloodpoint cost to fill the remaining web, summed over every non-center node
+    (the center auto-spend buys them all). pooled-out nodes still cost bp, so they count too. used by
+    the bp-floor stop to tell an affordable level from the final partial one."""
+    return sum(_node_cost(n, cost_table) for n in nodes if not n.is_center)
+
+
+def _reached_level_goal(prestige, level, stop_prestige, stop_level):
+    """has the run reached its (prestige, level) goal, so it should stop? both 0 = no goal.
+    with a prestige target we stop once past it, or on it once the level side is also met (level
+    defaulting to 1, i.e. the instant that prestige is reached). a level-only goal stops at that
+    bloodweb level in the current prestige. a None read (ocr couldn't tell) never triggers a stop."""
+    if not stop_prestige and not stop_level:
+        return False
+    if stop_prestige:
+        if prestige is None:
+            return False
+        if prestige > stop_prestige:
+            return True
+        if prestige < stop_prestige:
+            return False
+        return level is not None and level >= (stop_level or 1)   # prestige matches, check the level
+    return level is not None and level >= stop_level              # level-only goal
+
+
+def do_prestige(center_xy, frame, region, hold_s=0.05, prestige_wait_s=PRESTIGE_WAIT_S,
+                advance_s=ADVANCE_S, ok_tries=8, ok_wait_s=1.0):
+    """prestige the character: click the star at center_xy, then dismiss the REWARDS UNLOCKED screen.
+    center_xy is the full-frame web center remembered from the filled level-50 web (the prestige star
+    sits there; the empty prestige screen's own center read is unreliable, so we reuse the good one).
+    clicks the star, waits prestige_wait_s for the animation before the rewards OK button appears,
+    polls for that OK button (ocr) and clicks it, then waits advance_s (the bloodweb transition timer)
+    for the fresh level-1 web and parks off-web. live only.
+    """
+    sx, sy = capture.frame_to_screen(int(center_xy[0]), int(center_xy[1]), region)
+    input_control.click_node(sx, sy, hold_s=hold_s)
+    time.sleep(prestige_wait_s)   # animation plays out before the rewards OK button shows up
+    for _ in range(ok_tries):
+        f, reg = capture.grab_with_region(region)
+        ok = ocr.find_ok_button(f)
+        if ok is not None:
+            ox, oy = capture.frame_to_screen(int(ok[0]), int(ok[1]), reg)
+            input_control.click_node(ox, oy, hold_s=hold_s)
+            break
+        time.sleep(ok_wait_s)   # rewards screen not up yet, wait and re-check
+    time.sleep(advance_s)   # bloodweb transition timer: let the fresh level-1 web render
+
+    # park off-web so the next scan's grab holds no hovered tooltip (same PARK_XY as the ocr park).
+    h, w = frame.shape[:2]
+    px_f, py_f = Resolution.PARK_XY
+    park_x, park_y = capture.frame_to_screen(int(px_f * w), int(py_f * h), region)
+    input_control.move_to(park_x, park_y)
+
+
 def do_auto_spend(nodes, frame, region, hold_s=0.05, advance_s=ADVANCE_S):
     """no priority left in this web, hand it to dbd's center entity node to finish the level.
     clicking the center auto-completes the remaining buys and advances to the next web.
@@ -543,7 +622,7 @@ def _open_run_log():
         return None
 
 
-def run(source, config, switch, rows, click=True, debug=False, frame_sink=None):
+def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, status_sink=None):
     """the decide loop: one scan per level, then click our priorities off that single snapshot
     before handing the rest to dbd's center auto-spend and advancing.
     dry-run (logs intent, sends no input) whenever click=False; main folds the config dry_run
@@ -552,6 +631,17 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None):
     frame_sink, if given, is called each scan (only while debug and a live frame exist) with an
     annotated bgr frame (detect.draw_detections), so a caller like the ui's debug view can show
     what the loop is seeing without popping a blocking window.
+    status_sink, if given, is called each live scan with {"prestige","level","bp"} (any may be None),
+    so the debug view can show the ocr'd values to sanity-check the threshold/prestige reads.
+
+    optional stops and prestige (all live-only, off unless configured):
+      stop_bp_threshold  spend down toward a bp floor; on the final level we can't fully afford, buy
+                         priorities up to the estimated budget then stop instead of auto-spending.
+      auto_prestige      at bloodweb level 50, once the web is consumed the center is the prestige
+                         star: hover it to confirm 'PRESTIGE', click it, dismiss the rewards screen,
+                         and carry on. a mere detection miss can't trigger it (the hover must confirm).
+      stop_prestige /    stop once the character reaches the target (prestige, bloodweb level).
+      stop_level
 
     one scan per level (not per buy): dbd auto-buys the cheapest path to any node, so every node is
     clickable now and positions stay put until the level advances. we walk priorities high to low off
@@ -565,12 +655,20 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None):
     them); live_source has neither and relies on the screen changing after the auto-spend."""
     dry_run = not click
     bp_floor = config.get("stop_bp_threshold", 0)  # 0 disables the bp stop
+    auto_prestige = bool(config.get("auto_prestige", False))
+    stop_prestige = int(config.get("stop_prestige", 0) or 0)
+    stop_level = int(config.get("stop_level", 0) or 0)
+    cost_table = config.get("rarity_bp_cost") or RARITY_BP_COST
     # timing knobs, all tunable from the settings ui to slow the loop down on a laggy machine.
     settle_s = config.get("settle_s", SETTLE_S)         # post-buy wait before the next pick
     advance_s = config.get("advance_s", ADVANCE_S)      # wait for the level transition after auto-spend
+    prestige_wait_s = config.get("prestige_wait_s", PRESTIGE_WAIT_S)  # post-prestige-click wait before the ok button
     hover_s = config.get("ocr_hover_s", ocr.HOVER_DELAY_S)  # tooltip fade-in wait before an ocr read
     consume = getattr(source, "consume", None)     # stateful-source hooks, absent on live_source
     advance = getattr(source, "advance", None)
+    # log the ocr'd status each scan when debugging a threshold/prestige feature, to sanity-check it.
+    report_status = debug and (bp_floor or stop_prestige or stop_level or auto_prestige)
+    last_center = None   # full-frame (x,y) web center from the last filled scan; the prestige star sits here
 
     # mirror this run's debug prints to an on-disk log so misreads can be mined across sessions.
     # per-line flush keeps the log intact even if the panic key kills the process mid-scan.
@@ -589,6 +687,60 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None):
         # one capture + detect for the whole level.
         frame, region, nodes = source()
 
+        # read the ui status (live only), only what a live feature actually needs so a run with no
+        # thresholds does no extra ocr. report_status (debug + a feature on) also forces every read so
+        # the debug readout can show all three to sanity-check them (feature: the debug bp/level view).
+        level = prestige = bp = None
+        if frame is not None:
+            level = ocr.read_bloodweb_level(frame)   # always: cheap, and gates the level-50 prestige/stop
+            if stop_prestige or report_status:
+                prestige = ocr.read_prestige_level(frame)
+            if bp_floor or report_status:
+                bp = ocr.read_bp(frame)
+            if report_status:
+                if status_sink is not None:
+                    status_sink({"prestige": prestige, "level": level, "bp": bp})
+                print(f"[status] prestige={prestige} level={level} bp={bp}")
+
+        # level/prestige goal-stop: quit once the target (prestige, level) is reached.
+        if _reached_level_goal(prestige, level, stop_prestige, stop_level):
+            print(f"stop: reached goal (prestige {stop_prestige}, level {stop_level}) "
+                  f"at prestige={prestige} level={level}")
+            break
+
+        # remember the web center from a filled scan; the prestige star later sits here and the empty
+        # prestige screen's own center read is unreliable, so we reuse this good one to hover/click it.
+        real_nodes = [n for n in nodes if not n.is_center]
+        center_node = next((n for n in nodes if n.is_center), None)
+        if real_nodes and center_node is not None:
+            last_center = (center_node.x, center_node.y)
+
+        # prestige-ready: at level 50 the filled web has been consumed and the center is now the
+        # prestige star. an empty web at 50 is the trigger, but a detection miss also looks empty, so
+        # always hover the remembered center and require its tooltip to say PRESTIGE before acting
+        # (prestige spends 20k bp and resets the character, and a false stop is a nuisance too).
+        if level == PRESTIGE_LEVEL and not real_nodes and frame is not None:
+            confirmed = False
+            if last_center is not None and not switch.killed:
+                txt = ocr.read_center_hover_text(frame, region, last_center, hover_delay_s=hover_s)
+                confirmed = "PRESTIGE" in txt
+            if confirmed and not auto_prestige:
+                print("stop: bloodweb level 50 reached (auto-prestige off)")
+                break
+            if confirmed:
+                if dry_run:
+                    print(f"[dry-run] prestige: click star @ {last_center}, dismiss rewards, continue")
+                else:
+                    print("[prestige] level 50 reached, prestiging")
+                    do_prestige(last_center, frame, region, prestige_wait_s=prestige_wait_s,
+                                advance_s=advance_s)
+                if advance:
+                    advance()
+            elif debug:
+                print("[prestige] level 50 empty web but hover didn't confirm PRESTIGE; waiting")
+            _interruptible_sleep(switch, settle_s)
+            continue     # rescan (prestiged onto a fresh web, or waiting to confirm)
+
         # nothing detected (live: anchors unread / bloodweb not visible). do NOT fall through: with
         # zero nodes choose_next returns None and the auto-spend fallback would blind-click the frame
         # center on whatever screen is up. wait and rescan instead.
@@ -596,11 +748,11 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None):
             _interruptible_sleep(switch, settle_s)
             continue
 
-        # optional stop: quit once the live bloodpoint total falls to the configured floor.
-        # checked per level here (per scan), so a stop can lag the floor by up to one level's spend.
-        if bp_floor and frame is not None:
-            bp = ocr.read_bp(frame)
-            if bp is not None and bp <= bp_floor:
+        # bp floor: this level's spend budget. 0 disables. a budget already spent means stop now.
+        budget = None
+        if bp_floor and bp is not None:
+            budget = bp - bp_floor
+            if budget <= 0:
                 print(f"stop: bloodpoints {bp} at or below floor {bp_floor}")
                 break
 
@@ -614,6 +766,11 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None):
                 frame_sink(annotated)
             _save_scan_frames(frame, annotated)
 
+        # on the final level the budget can't cover the whole web, so buy priorities up to the budget
+        # and stop instead of auto-spending (which would spend the whole web and blow past the floor).
+        final_level = budget is not None and budget < estimate_web_cost(nodes, cost_table)
+        est_spent = 0
+
         # click every priority match on this snapshot, high to low, skipping spots already clicked.
         spent = []
         while switch.running and not switch.killed:
@@ -623,6 +780,9 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None):
                 break                     # no priorities left on this web
             if switch.killed:             # panic key landed mid-pick, don't click
                 break
+            if final_level and est_spent + _node_cost(choice, cost_table) > budget:
+                break                     # can't afford more priorities within the bp floor
+            est_spent += _node_cost(choice, cost_table)
             # margin + runner-up on the buy line are the followup lever;
             # a confident buy with a tiny margin vs a plausible runner-up flags a possible mispick.
             runner = f" vs {choice.runner_up!r}" if (debug and choice.runner_up) else ""
@@ -647,6 +807,15 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None):
             break
         if not switch.running:            # paused mid-web: idle without auto-spending, resume rescans
             continue
+
+        # final bp-floor level: we bought the priorities we could afford, now stop rather than
+        # auto-spending the rest of the web (which would spend past the floor). leaves ~budget unspent.
+        if final_level:
+            left = bp - est_spent if bp is not None else None
+            print(f"stop: near bp floor {bp_floor}"
+                  + (f" (est ~{left} bp left)" if left is not None else "")
+                  + ", stopping before auto-spend")
+            break
 
         # priorities exhausted: hand the rest of the web to dbd's center auto-spend, then advance.
         if dry_run:

@@ -89,8 +89,10 @@ class RunScreen(ctk.CTkFrame):
             rows = self.app.app_state.library.rows
             debug_screen = self.app.screens.get("debug")
             frame_sink = debug_screen.push_frame if debug_screen is not None else None
+            status_sink = debug_screen.push_status if debug_screen is not None else None
             self.controller = RunController(
-                rows, self.log_queue, self.app.app_state.config or {}, frame_sink=frame_sink)
+                rows, self.log_queue, self.app.app_state.config or {}, frame_sink=frame_sink,
+                status_sink=status_sink)
             self.app.app_state.loop = self.controller  # so window-close stops the thread
         return self.controller
 

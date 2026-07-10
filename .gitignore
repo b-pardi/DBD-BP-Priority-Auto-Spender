@@ -3,6 +3,7 @@ __pycache__/
 *.pyo
 .venv/
 *env/
+.vscode/
 
 # scraped icon library is large and fully regenerable from src/scraper.py
 data/icons/*

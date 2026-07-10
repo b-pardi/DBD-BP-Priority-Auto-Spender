@@ -32,6 +32,7 @@ class DebugScreen(ctk.CTkFrame):
         super().__init__(master)
         self.app = app
         self._frame_q = queue.Queue(maxsize=1)  # newest annotated frame only
+        self._status_q = queue.Queue(maxsize=1)  # newest ocr'd run status (bp/level/prestige)
         self._log_q = queue.Queue()
         self._ctk_img = None       # keep a ref so the CTkImage isn't garbage-collected
         self._scraping = False
@@ -56,6 +57,16 @@ class DebugScreen(ctk.CTkFrame):
     def log(self, line):
         self._log_q.put(line)
 
+    def push_status(self, status):
+        """replace the shown ocr'd run status (dict of prestige/level/bp), dropping any stale one.
+        fed by the run loop each live scan so the ocr reads behind the threshold/prestige features can
+        be sanity-checked here against what the game actually shows."""
+        try:
+            self._status_q.get_nowait()
+        except queue.Empty:
+            pass
+        self._status_q.put(status)
+
     # panels
     def _build_image_panel(self):
         left = ctk.CTkFrame(self)
@@ -75,6 +86,11 @@ class DebugScreen(ctk.CTkFrame):
             side="left", padx=(4, 0))
         ctk.CTkButton(toolbar, text="Save frame", command=self._save_frame).pack(
             side="right")
+        # ocr'd run status (prestige / bloodweb level / bp), fed by the run loop each live scan when a
+        # threshold or auto-prestige is active, so the reads can be checked against the game.
+        self.status_label = ctk.CTkLabel(
+            toolbar, text="OCR: prestige — · level — · bp —", font=theme.FONT_SMALL)
+        self.status_label.pack(side="right", padx=theme.PAD)
 
         self.image_viewport = ctk.CTkScrollableFrame(left)
         self.image_viewport.grid(row=2, column=0, sticky="nsew", padx=theme.PAD, pady=(0, theme.PAD))
@@ -138,6 +154,10 @@ class DebugScreen(ctk.CTkFrame):
             self._render_frame(self._frame_q.get_nowait())
         except queue.Empty:
             pass
+        try:
+            self._render_status(self._status_q.get_nowait())
+        except queue.Empty:
+            pass
         # re-enable the scrape button on the main thread once the worker has finished.
         if not self._scraping and str(self.scrape_btn.cget("state")) == "disabled":
             self.scrape_btn.configure(state="normal", text="Run scraper")
@@ -146,6 +166,14 @@ class DebugScreen(ctk.CTkFrame):
     def _append_log(self, line):
         self.logbox.insert("end", line + "\n")
         self.logbox.see("end")
+
+    def _render_status(self, status):
+        """update the ocr status readout; a None value shows as an em dash (couldn't read)."""
+        def fmt(v):
+            return "—" if v is None else v
+        self.status_label.configure(
+            text=f"OCR: prestige {fmt(status.get('prestige'))} · "
+                 f"level {fmt(status.get('level'))} · bp {fmt(status.get('bp'))}")
 
     def _render_frame(self, bgr, keep=True):
         """render bgr at the current zoom. keep=True (a fresh frame off the queue) also stashes

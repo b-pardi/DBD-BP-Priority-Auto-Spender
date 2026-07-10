@@ -32,10 +32,11 @@ class _QueueWriter:
 
 
 class RunController:
-    def __init__(self, rows, log_queue, config, frame_sink=None):
+    def __init__(self, rows, log_queue, config, frame_sink=None, status_sink=None):
         self.rows = rows
         self.log_queue = log_queue
         self.frame_sink = frame_sink  # debug screen's push_frame, or None
+        self.status_sink = status_sink  # debug screen's push_status (ocr'd bp/level/prestige), or None
         # arm once: keys come from the config present at creation (rebinds need a restart to re-arm,
         # but the on-screen buttons always work).
         self.switch = spender.Switch(
@@ -90,7 +91,8 @@ class RunController:
         sys.stdout = _QueueWriter(self.log_queue)  # tee the loop's prints into the ui log
         try:
             spender.run(source, config, self.switch, self.rows, click=click,
-                        debug=config.get("debug", False), frame_sink=self.frame_sink)
+                        debug=config.get("debug", False), frame_sink=self.frame_sink,
+                        status_sink=self.status_sink)
         except Exception as e:
             self.log_queue.put(f"run error: {type(e).__name__}: {e}")
         finally:

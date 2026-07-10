@@ -165,7 +165,9 @@ def find_web_bbox(frame, pad_frac=CROP_PAD_FRAC, resolution=None):
     def box_of(words, *needles):
         return next((b for txt, b in words if any(n in txt for n in needles)), None)
 
-    shared = box_of(top, "SHARED")               # web left edge + a top reference
+    # the perks label reads 'SHARED PERKS' at prestige >=1 but 'SHAREABLE PERKS' at prestige 0, so
+    # match on 'SHARE' (a substring of both) with 'PERK' as a fallback, else prestige-0 webs never crop.
+    shared = box_of(top, "SHARE", "PERK")        # web left edge + a top reference
     back = box_of(bl, "BACK", "ESC")             # sits just below the web bottom
     # 'SPEND BLOODPOINTS' is two words; the web's right edge is BLOODPOINTS' (rightmost) edge, so
     # take the max right edge over both rather than the first match (SPEND alone stops short).
@@ -210,6 +212,111 @@ def read_bp(frame, resolution=None):
     api.SetImage(Image.fromarray(th))
     digits = re.sub(r"\D", "", api.GetUTF8Text())
     return int(digits) if len(digits) >= 4 else None # ignore stray short misreads
+
+
+def _read_region_text(frame, region, scale=3, psm=None, binarize=False):
+    """ocr a fractional region (fx0,fy0,fx1,fy1) of the frame and return its text UPPERCASED.
+    a small generic reader for the fixed-label reads (prestige tooltip, ok button); sparse-text psm
+    by default so a lone word like 'OK' still registers. binarize (otsu) rescues dim text like the
+    dimmed rewards-screen OK button, which reads as garbage off the raw grayscale. frame is the full
+    bgr grab (h, w, 3)."""
+    t = get_tesserocr()
+    h, w = frame.shape[:2]
+    x0, y0, x1, y1 = (int(region[0] * w), int(region[1] * h),
+                      int(region[2] * w), int(region[3] * h))
+    g = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    g = cv2.resize(g, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC)
+    if binarize:
+        _, g = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    api = _api(psm if psm is not None else t.PSM.SPARSE_TEXT)
+    api.SetImage(Image.fromarray(g))
+    return (api.GetUTF8Text() or "").upper()
+
+
+def read_bloodweb_level(frame, resolution=None):
+    """current bloodweb level (1..50) from the strip under the character name, or None.
+    reads the whole 'BLOODWEB LEVEL n' line and takes the trailing number, so a garbled 'BLOODWEB'
+    doesn't matter as long as the digits read. backs the level goal-stop and the prestige-ready
+    trigger (level 50 = the web the prestige star replaces). frame is the full bgr grab (h, w, 3).
+    resolution (default Resolution.from_frame(frame)) supplies LEVEL_REGION."""
+    if frame is None:
+        return None
+    resolution = resolution or Resolution.from_frame(frame)
+    h, w = frame.shape[:2]
+    region = resolution.LEVEL_REGION
+    x0, y0, x1, y1 = (int(region[0] * w), int(region[1] * h),
+                      int(region[2] * w), int(region[3] * h))
+    g = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    g = cv2.resize(g, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+    _, th = cv2.threshold(g, 150, 255, cv2.THRESH_BINARY)  # keep the bright text
+    api = _api(get_tesserocr().PSM.SINGLE_LINE)
+    api.SetImage(Image.fromarray(th))
+    nums = re.findall(r"\d+", api.GetUTF8Text())
+    if not nums:
+        return None
+    lvl = int(nums[-1])
+    return lvl if 1 <= lvl <= 50 else None  # bloodweb levels only run 1..50
+
+
+def read_prestige_level(frame, resolution=None):
+    """current prestige level from the crest to the left of the name, or None if it can't be read.
+    the crest digit sits on a noisy stone texture, so crop tight to its center, upscale hard, otsu,
+    and open/close away the speckle before a digit-only ocr. an empty crest (no digit) is prestige 0.
+    verified against the prestige 0/1 fixtures; higher and two-digit prestige are unproven, so this is
+    the best-effort read the user opted into (used for the prestige goal-stop and the debug readout,
+    never to decide whether to prestige, which keys off level 50 + a hover confirm instead).
+    frame is the full bgr grab (h, w, 3). resolution supplies PRESTIGE_CREST_REGION."""
+    if frame is None:
+        return None
+    resolution = resolution or Resolution.from_frame(frame)
+    h, w = frame.shape[:2]
+    region = resolution.PRESTIGE_CREST_REGION
+    x0, y0, x1, y1 = (int(region[0] * w), int(region[1] * h),
+                      int(region[2] * w), int(region[3] * h))
+    g = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    g = cv2.resize(g, None, fx=8, fy=8, interpolation=cv2.INTER_CUBIC)
+    g = cv2.GaussianBlur(g, (3, 3), 0)
+    _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    th = cv2.morphologyEx(th, cv2.MORPH_OPEN, np.ones((5, 5), np.uint8))   # kill speckle
+    th = cv2.morphologyEx(th, cv2.MORPH_CLOSE, np.ones((9, 9), np.uint8))  # solidify strokes
+    api = _api(get_tesserocr().PSM.SINGLE_LINE, "0123456789")
+    api.SetImage(Image.fromarray(th))
+    digits = re.sub(r"\D", "", api.GetUTF8Text())
+    return int(digits) if digits else 0  # no digit found = empty crest = prestige 0
+
+
+def read_center_hover_text(frame, region, center_xy, resolution=None, hover_delay_s=None):
+    """hover the web center and return the tooltip text UPPERCASED, for the prestige-ready confirm.
+    center_xy is the full-frame web center remembered from the filled level-50 web (the prestige star
+    sits there, and the empty prestige screen's own center detection is unreliable). parks first so no
+    stale tooltip lingers, hovers, lets the tooltip fade in, then ocrs PRESTIGE_TOOLTIP_REGION; the
+    caller checks for 'PRESTIGE'. live only. frame is the last grab (for shape + resolution)."""
+    from . import capture, input_control  # live deps imported lazily so ocr stays test-importable
+    hover_delay_s = HOVER_DELAY_S if hover_delay_s is None else hover_delay_s
+    resolution = resolution or Resolution.from_frame(frame)
+    h, w = frame.shape[:2]
+    park_xy = resolution.PARK_XY
+    px, py = capture.frame_to_screen(int(park_xy[0] * w), int(park_xy[1] * h), region)
+    input_control.move_to(px, py)
+    sx, sy = capture.frame_to_screen(int(center_xy[0]), int(center_xy[1]), region)
+    input_control.move_to(sx, sy)
+    time.sleep(hover_delay_s)
+    after, _ = capture.grab_with_region(region)
+    return _read_region_text(after, resolution.PRESTIGE_TOOLTIP_REGION)
+
+
+def find_ok_button(frame, resolution=None):
+    """the REWARDS UNLOCKED screen's OK button click point (full-frame px), or None if it isn't up.
+    ocrs OK_REGION and, when 'OK' is present, returns OK_CLICK_XY in pixels so do_prestige can dismiss
+    the rewards screen after a prestige. frame is the full bgr grab (h, w, 3)."""
+    if frame is None:
+        return None
+    resolution = resolution or Resolution.from_frame(frame)
+    h, w = frame.shape[:2]
+    if "OK" in _read_region_text(frame, resolution.OK_REGION, binarize=True):
+        cx, cy = resolution.OK_CLICK_XY
+        return int(cx * w), int(cy * h)
+    return None
 
 
 def read_tooltip(tooltip_crop_bgr):

@@ -46,24 +46,24 @@ everything else works the same as the dev instructions below: borderless dbd, dr
     - [x] synthetic data data generation
     - [x] train/tune/integrate model
 - [x] node detection/extraction v2
-- [ ] bloodweb prestige screen detection
+- [x] bloodweb prestige screen detection
 - [x] auto determine bbox for bloodweb frame crop.
 - [x] fix non-breaking UI bugs
 - [x] add within tier priority selection
 - [ ] core functionality test code on fixtures
-- [ ] flush out documentation
+- [x] flush out documentation
     - [ ] add instructions tab to ui
 - [x] update default settings and setup profile templates
 - [x] bundle an exe
 
 #### Beta (some smart nice to have features)
 - [ ] Entity aware node selection
-- [ ] bloodweb prestige/level spending cap
-- [ ] bloodpoint spending limit
+- [x] bloodweb prestige/level spending cap
+- [x] bloodpoint spending limit
 - [ ] validate abilities in other bloodweb menu backgrounds
-- [ ] implement the synthetic node background images into the scraper
+- [ ] add the synthetic node background images into the scraper
 - [ ] update ui button to auto update the software in the ui
-- [ ] auto pause when detecting bloodweb no longer visible
+- [x] auto pause when detecting bloodweb no longer visible
 - [ ] ui drag and drop priority elements
 
 

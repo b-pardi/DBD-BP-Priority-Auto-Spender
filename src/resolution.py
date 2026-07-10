@@ -32,7 +32,12 @@ class Resolution:
     # fraction of frame already is the resolution-independent form. centralized here so ocr.py and
     # detect's debug cockpit read one definition instead of each keeping their own literal.
     BP_REGION = (0.8765, 0.0472, 0.9215, 0.0764)           # ocr.read_bp: top-bar bp total
-    ANCHOR_TOP_ZONE = (0.08, 0.03, 0.52, 0.24)             # ocr.find_web_bbox: SHARED PERKS / SPEND BLOODPOINTS
+    LEVEL_REGION = (0.145, 0.065, 0.245, 0.088)            # ocr.read_bloodweb_level: the "BLOODWEB LEVEL n" strip below the name
+    PRESTIGE_CREST_REGION = (0.113, 0.045, 0.142, 0.088)  # ocr.read_prestige_level: the crest digit left of the name (empty crest = prestige 0)
+    PRESTIGE_TOOLTIP_REGION = (0.29, 0.42, 0.55, 0.58)    # ocr.read_center_hover_text: where the hovered center's "PRESTIGE LEVEL n" tooltip lands
+    OK_REGION = (0.87, 0.81, 0.96, 0.89)                  # ocr.find_ok_button: the REWARDS UNLOCKED screen's OK button
+    OK_CLICK_XY = (0.910, 0.852)                          # ok button center, clicked to dismiss the rewards screen
+    ANCHOR_TOP_ZONE = (0.08, 0.03, 0.52, 0.24)             # ocr.find_web_bbox: SHARED/SHAREABLE PERKS / SPEND BLOODPOINTS
     ANCHOR_BL_ZONE = (0.0, 0.82, 0.28, 1.0)                # ocr.find_web_bbox: BACK [ESC]
     PARK_XY = (0.01, 0.01)                                 # neutral cursor rest, off the web entirely. NOT (0,0): the exact corner is pydirectinput's failsafe point, so the first input call after parking there raises FailSafeException and kills the run
     WEB_BBOX_FALLBACK = (300 / BASELINE_W, 200 / BASELINE_H,

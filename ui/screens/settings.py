@@ -1,9 +1,10 @@
 """settings screen: a small form, each control labeled and persisted into the single config file.
 
-controls: enable debugging, rebind the kill/start hotkeys, matching method, binarization method, and
-the post-buy settle wait. all edit app.app_state.config in memory; Save writes the whole config through
-the shared serializer. the debug toggle also flips the Debug nav button immediately (App.refresh_nav).
-deferred (later pass): bp-threshold, capture-region picker, calibrate.
+controls: enable debugging, rebind the kill/start hotkeys, matching method, binarization method, the
+timing waits, and the stops + auto-prestige (bp floor, prestige/level goal). all edit
+app.app_state.config in memory; Save writes the whole config through the shared serializer. the debug
+toggle also flips the Debug nav button immediately (App.refresh_nav).
+deferred (later pass): capture-region picker, calibrate.
 """
 
 import tkinter.messagebox as messagebox
@@ -127,6 +128,37 @@ class SettingsScreen(ctk.CTkFrame):
         self.advance.insert(0, str(cfg.get("advance_s", spender.ADVANCE_S)))
         self.advance.grid(row=8, column=1, sticky="w", padx=theme.PAD, pady=4)
 
+        # stops & prestige (all live-only; 0 disables a threshold). see spender.run.
+        self.auto_prestige_var = ctk.BooleanVar(value=bool(cfg.get("auto_prestige", False)))
+        ctk.CTkSwitch(form, text="Auto-prestige at bloodweb level 50 (spends 20k bp each time)",
+                      variable=self.auto_prestige_var).grid(
+            row=13, column=0, columnspan=2, sticky="w", padx=theme.PAD, pady=(theme.PAD, 4))
+
+        # wait after clicking the prestige star before the rewards OK button appears
+        ctk.CTkLabel(form, text="Prestige animation wait (seconds)", anchor="w").grid(
+            row=14, column=0, sticky="w", padx=theme.PAD, pady=4)
+        self.prestige_wait = ctk.CTkEntry(form, width=120)
+        self.prestige_wait.insert(0, str(cfg.get("prestige_wait_s", spender.PRESTIGE_WAIT_S)))
+        self.prestige_wait.grid(row=14, column=1, sticky="w", padx=theme.PAD, pady=4)
+
+        ctk.CTkLabel(form, text="Stop at bloodpoints remaining (0 = off)", anchor="w").grid(
+            row=15, column=0, sticky="w", padx=theme.PAD, pady=4)
+        self.stop_bp = ctk.CTkEntry(form, width=120)
+        self.stop_bp.insert(0, str(int(cfg.get("stop_bp_threshold", 0) or 0)))
+        self.stop_bp.grid(row=15, column=1, sticky="w", padx=theme.PAD, pady=4)
+
+        ctk.CTkLabel(form, text="Stop at prestige level (0 = off)", anchor="w").grid(
+            row=16, column=0, sticky="w", padx=theme.PAD, pady=4)
+        self.stop_prestige = ctk.CTkEntry(form, width=120)
+        self.stop_prestige.insert(0, str(int(cfg.get("stop_prestige", 0) or 0)))
+        self.stop_prestige.grid(row=16, column=1, sticky="w", padx=theme.PAD, pady=4)
+
+        ctk.CTkLabel(form, text="Stop at bloodweb level (0 = off)", anchor="w").grid(
+            row=17, column=0, sticky="w", padx=theme.PAD, pady=4)
+        self.stop_level = ctk.CTkEntry(form, width=120)
+        self.stop_level.insert(0, str(int(cfg.get("stop_level", 0) or 0)))
+        self.stop_level.grid(row=17, column=1, sticky="w", padx=theme.PAD, pady=4)
+
         ctk.CTkButton(self, text="Save settings", command=self._save).pack(
             anchor="w", padx=theme.PAD, pady=theme.PAD)
 
@@ -198,13 +230,24 @@ class SettingsScreen(ctk.CTkFrame):
         cfg["pool_inferred"] = bool(self.pool_inferred_var.get()) or cfg["pool_exclusive"]
         # switch is worded as the skip behavior, so it's the inverse of the fallback flag
         cfg["weak_match_fallback"] = not bool(self.skip_weak_var.get())
+        cfg["auto_prestige"] = bool(self.auto_prestige_var.get())
         for key, entry, label in (("settle_s", self.settle, "settle wait"),
                                   ("ocr_hover_s", self.hover, "OCR tooltip wait"),
-                                  ("advance_s", self.advance, "level transition wait")):
+                                  ("advance_s", self.advance, "level transition wait"),
+                                  ("prestige_wait_s", self.prestige_wait, "prestige animation wait")):
             try:
                 cfg[key] = float(entry.get())
             except ValueError:
                 messagebox.showerror("invalid value", f"{label} must be a number (seconds).")
+                return
+        # the stop thresholds are whole numbers, 0 = off
+        for key, entry, label in (("stop_bp_threshold", self.stop_bp, "bloodpoints remaining"),
+                                  ("stop_prestige", self.stop_prestige, "prestige level"),
+                                  ("stop_level", self.stop_level, "bloodweb level")):
+            try:
+                cfg[key] = int(float(entry.get() or 0))
+            except ValueError:
+                messagebox.showerror("invalid value", f"{label} must be a whole number.")
                 return
         try:
             config_io.save(cfg)

@@ -88,7 +88,7 @@ EXTRA_EVENT_ICONS = {
     "T_UI_iconItems_poison_anniversary2026.png":      ("banquetPoison",    "item"),
 }
 
-# first-run scrape writes here: cache_dir = repo data/ in dev, %APPDATA%/dbdbp/cache when frozen
+# first-run scrape writes here: cache_dir = repo data/ in dev, %APPDATA%/dbdbp-pas/cache when frozen
 DEFAULT_OUT = paths.cache_dir() / "icons"
 DEFAULT_INDEX = paths.cache_dir() / "icons_index.json"
 

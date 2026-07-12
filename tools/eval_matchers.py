@@ -345,7 +345,7 @@ def render_bank(rows, rarity, res=NCC_RES):
     if rarity in _BANK:
         return _BANK[rarity]
     idx_mtime = Path(D.DEFAULT_INDEX).stat().st_mtime
-    cache = paths.cache_dir() / f"renderbank-{rarity.replace(' ', '_')}-{res}-{len(rows)}.npy"
+    cache = paths.template_cache_dir() / f"renderbank-{rarity.replace(' ', '_')}-{res}-{len(rows)}.npy"
     if cache.is_file() and cache.stat().st_mtime >= idx_mtime:
         B = np.load(cache)
     else:
@@ -440,7 +440,7 @@ def cnn_bank(rows, net):
     """(n,128) l2-normed anchor embeddings aligned to rows, cached like the ncc templates. cache is
     invalidated by BOTH the index mtime (library changed) and the onnx mtime (retrained), so a new
     library or model rebuilds it automatically."""
-    cache = paths.cache_dir() / f"embed-{CNN_ONNX.stem}-{CNN_RES}-{len(rows)}.npy"
+    cache = paths.template_cache_dir() / f"embed-{CNN_ONNX.stem}-{CNN_RES}-{len(rows)}.npy"
     fresh = max(Path(D.DEFAULT_INDEX).stat().st_mtime, CNN_ONNX.stat().st_mtime)
     if cache.is_file() and cache.stat().st_mtime >= fresh:
         B = np.load(cache)

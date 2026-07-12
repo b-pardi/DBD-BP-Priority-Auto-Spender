@@ -13,13 +13,15 @@ present it clicks the center auto-spend to finish the level and move on.
 
 ## Running the app (packaged exe)
 
-grab the zip, extract the whole `dbdbp` folder somewhere, and run `dbdbp.exe` inside it. keep the folder together, the exe needs the files next to it.
+grab the zip, extract the whole `dbdbp-pas` folder somewhere, and run `dbdbp-pas.exe` inside it. keep the folder together, the exe needs the files next to it.
 
 windows smartscreen will probably warn on first launch since the exe isn't code-signed (and it ships input-injection libs, which antivirus tends to flag). that's expected. click "more info" then "run anyway". if defender quarantines it, allow it.
 
 first launch has no icon library yet, so it'll offer to fetch the dead by daylight icons from the wiki. let it run once (a few minutes, shows a progress bar). after that it's cached and startup is fast.
 
-your config, the icon cache, and debug output live under `%APPDATA%\dbdbp` (not in the app folder), so you can move or replace the app folder without losing settings. deleting `%APPDATA%\dbdbp` resets it to a fresh install.
+the app checks github for a newer release on launch and tells you if there is one. nothing downloads until you say yes; if you do, it downloads the new build, swaps itself over and restarts. there's a "check for updates" button on the nav rail too.
+
+your config, the icon cache, and debug output live under `%APPDATA%\dbdbp-pas` (not in the app folder), so you can move or replace the app folder without losing settings. deleting `%APPDATA%\dbdbp-pas` resets it to a fresh install.
 
 everything else works the same as the dev instructions below: borderless dbd, dry-run is the default, f7 start / f8 kill.
 
@@ -52,19 +54,20 @@ everything else works the same as the dev instructions below: borderless dbd, dr
 - [x] add within tier priority selection
 - [ ] core functionality test code on fixtures
 - [x] flush out documentation
-    - [ ] add instructions tab to ui
+    - [x] add instructions tab to ui
 - [x] update default settings and setup profile templates
 - [x] bundle an exe
 
-#### Beta (some smart nice to have features)
+#### Full Release (some smart nice to have features)
 - [ ] Entity aware node selection
 - [x] bloodweb prestige/level spending cap
 - [x] bloodpoint spending limit
 - [ ] validate abilities in other bloodweb menu backgrounds
 - [ ] add the synthetic node background images into the scraper
-- [ ] update ui button to auto update the software in the ui
+- [ ] integrate synth glyphs and model training into ui, so no need for new releases just to retrain model for new icons
+- [x] update ui button to auto update the software in the ui
 - [x] auto pause when detecting bloodweb no longer visible
-- [ ] ui drag and drop priority elements
+- [x] ui drag and drop priority elements
 
 
 ## Setup

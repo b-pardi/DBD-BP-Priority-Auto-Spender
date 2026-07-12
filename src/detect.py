@@ -49,7 +49,7 @@ NCC_RES = 96  # res of the ncc template/query vectors (96 beats 128 on conf50, c
 
 # learned matcher runtime, the encoder is trained offline (tools/glyph_cnn.py, torch dev-only) and exported to onnx;
 # here we only RUN it via cv2.dnn so no torch ships. the onnx is a read-only bundled asset (resource_path),
-# the per-sprite embedding bank builds into cache_dir on first use like the ncc templates.
+# the per-sprite embedding bank builds into template_cache_dir on first use like the ncc templates.
 # CNN_RES must match the encoder input (tools/glyph_cnn.INPUT_RES).
 CNN_ONNX = paths.resource_path("data/models/glyph_encoder.onnx")
 CNN_RES = 96
@@ -185,10 +185,16 @@ def refine_ref_hsvs(disk_samples, seed=None, out_path=USR_HSV, min_samples=3):
     return refined
 
 
+def load_rows(index_path=DEFAULT_INDEX):
+    """just the metadata rows, no phashes. the ui only ever needs names/rarities/sprite paths, and
+    stacking the phashes costs ~20ms of startup it would never look at."""
+    return json.loads(Path(index_path).read_text(encoding="utf-8"))
+
+
 def load_index(index_path=DEFAULT_INDEX):
     """returns (rows, hashes). rows = metadata dicts; hashes = (n, 64) bool array of the
     precomputed phashes, stacked to query with a single vector op."""
-    rows = json.loads(Path(index_path).read_text(encoding="utf-8"))
+    rows = load_rows(index_path)
     hashes = np.stack([
         imagehash.hex_to_hash(r["phash"]).hash.flatten() for r in rows
     ])  # (n, 64)
@@ -230,9 +236,9 @@ def load_ncc_templates(rows, index_path=DEFAULT_INDEX, res=NCC_RES):
     """build (or load cached) the ncc template matrix: each library sprite -> a res*res grayscale vector,
     returns (T, T2): T = (n, res*res) float32 raw vectors,
     T2 = T**2 (reused for the masked-cosine template norms)"""
-    # cache in the writable cache dir (repo data/ in dev, %APPDATA%/dbdbp/cache when frozen),
-    # so the save works even when the bundled index sits in a read-only dir
-    cache = paths.cache_dir() / f"{Path(index_path).stem}.ncc{res}.npy"
+    # cache in the disposable template cache (repo data/cache in dev, .../cache/templates when
+    # frozen), so the save works even when the bundled index sits in a read-only dir
+    cache = paths.template_cache_dir() / f"{Path(index_path).stem}.ncc{res}.npy"
     if cache.is_file() and cache.stat().st_mtime >= Path(index_path).stat().st_mtime:
         T = np.load(cache)
         if T.shape == (len(rows), res * res):
@@ -341,7 +347,7 @@ def load_cnn_model():
 
 
 def load_cnn_bank(rows, index_path=DEFAULT_INDEX):
-    """(n,128) l2-normed sprite-embedding bank aligned to rows, cached to cache_dir like the ncc templates.
+    """(n,128) l2-normed sprite-embedding bank aligned to rows, cached to template_cache_dir like the ncc templates.
     invalidated by the index mtime (library changed) or onnx mtime (retrained), so a self-updating library or new model rebuilds it automatically.
     built over the FULL rows (pool masks the unavailable ones at match time, same as the ncc path)."""
     global _CNN_BANK
@@ -349,7 +355,7 @@ def load_cnn_bank(rows, index_path=DEFAULT_INDEX):
     key = (len(rows), onnx_mtime)
     if _CNN_BANK is not None and _CNN_BANK[0] == key:
         return _CNN_BANK[1]
-    cache = paths.cache_dir() / f"embed-{Path(CNN_ONNX).stem}-{CNN_RES}-{len(rows)}.npy"
+    cache = paths.template_cache_dir() / f"embed-{Path(CNN_ONNX).stem}-{CNN_RES}-{len(rows)}.npy"
     fresh = max(Path(index_path).stat().st_mtime, onnx_mtime)
     B = None
     if cache.is_file() and cache.stat().st_mtime >= fresh:
@@ -664,7 +670,7 @@ _RING_TPL = None    # cached [gray_sum, grad_sum, n] for the run
 
 
 def _ring_tpl_path():
-    return paths.cache_dir() / "ring-template.npz"
+    return paths.template_cache_dir() / "ring-template.npz"
 
 
 def _get_ring_tpl():

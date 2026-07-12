@@ -10,17 +10,20 @@ import customtkinter as ctk
 from ..theme import (
     ACCENT_W, FONT_BODY, FONT_SMALL, MUTED_TEXT_COLOR, PAD, ROW_H, THUMB_PX, rarity_color,
 )
+from .dragdrop import Draggable
 from .tooltip import bind_tooltip
 
 
 class ItemCard(ctk.CTkFrame):
-    def __init__(self, master, library, height=ROW_H, on_activate=None):
+    def __init__(self, master, library, height=ROW_H, on_activate=None,
+                 on_drop=None, on_drag_hover=None):
         # ctk 6.x: the height must be set here, and propagation turned off, or the card grows to
         # fit its children (the accent CTkFrame alone defaults to 200px) and the rows overlap.
         super().__init__(master, height=height, corner_radius=6)
         self.pack_propagate(False)
         self.library = library
         self.on_activate = on_activate
+        self.on_drop = on_drop            # (row, x_root, y_root) when the card is dragged onto a tier
         self.row = None
 
         self.accent = ctk.CTkFrame(self, width=ACCENT_W, corner_radius=0)  # rarity tint bar
@@ -33,9 +36,18 @@ class ItemCard(ctk.CTkFrame):
         self.rar = ctk.CTkLabel(self, text="", anchor="e", font=FONT_SMALL, width=72)
         self.rar.pack(side="right", padx=PAD)
 
-        # bind clicks on every sub-widget so the whole card is clickable (tk doesn't bubble).
-        for w in (self, self.accent, self.icon, self.name, self.rar):
-            w.bind("<Button-1>", lambda e: self._activate(1))
+        # left button is drag-aware (tk doesn't bubble, so every sub-widget is a source): a plain
+        # click still adds the row to the selected tier, but a drag drops it onto a specific tier.
+        # right-click stays a plain activate.
+        cells = (self, self.accent, self.icon, self.name, self.rar)
+        Draggable(
+            cells,
+            get_ghost_text=lambda: (self.row or {}).get("name", "item"),
+            on_click=lambda: self._activate(1),
+            on_drop=self._drop,
+            on_hover=on_drag_hover,
+        )
+        for w in cells:
             w.bind("<Button-3>", lambda e: self._activate(3))
         # hover tooltip: the wiki lead sentence for whatever row this (recycled) card holds.
         bind_tooltip(
@@ -59,3 +71,7 @@ class ItemCard(ctk.CTkFrame):
     def _activate(self, button):
         if self.on_activate and self.row is not None:
             self.on_activate(self.row, button)
+
+    def _drop(self, x_root, y_root):
+        if self.on_drop and self.row is not None:
+            self.on_drop(self.row, x_root, y_root)

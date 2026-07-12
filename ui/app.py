@@ -9,16 +9,19 @@ we never leak a clicking background thread.
 
 import tkinter as tk
 import tkinter.messagebox as messagebox
+import webbrowser
 
 import customtkinter as ctk
 
 from src import paths
-from . import config_io, scrape_runner, theme
+from . import config_io, scrape_runner, theme, updater
 from .widgets import tooltip
+from .widgets.emblem import BloodwebMark
 from .screens.priorities import PrioritiesScreen
 from .screens.settings import SettingsScreen
 from .screens.run import RunScreen
 from .screens.debug import DebugScreen
+from .screens.instructions import InstructionsScreen
 
 ASSETS = paths.resource_path("ui/assets")  # bundled read-only asset, _MEIPASS/ui/assets when frozen
 
@@ -47,7 +50,8 @@ class AppState:
 
 class App(ctk.CTk):
     # nav rail entries always shown; the debug screen is added/removed by refresh_nav.
-    NAV = [("priorities", "Priorities"), ("settings", "Settings"), ("run", "Run")]
+    NAV = [("priorities", "Priorities"), ("settings", "Settings"), ("run", "Run"),
+           ("instructions", "Instructions")]
 
     def __init__(self):
         self._set_app_user_model_id()  # before any window exists, so the taskbar groups us right
@@ -55,16 +59,28 @@ class App(ctk.CTk):
         ctk.set_appearance_mode("dark")
         self.title("dbd bloodweb auto-spender")
         self.minsize(1000, 640)
+        # explicit default window size: 1.75x the old baseline width, 1.2x its height, so the
+        # two-pane priority screen has room to breathe on first launch (user can still resize).
+        self.geometry("1750x768")
         self._set_window_icon()
 
         self.app_state = AppState()
+        # apply the saved accessibility text/widget scale before any screen is built, so the whole ui
+        # comes up at the chosen size (ctk.set_widget_scaling rescales live too, but building at the
+        # right size avoids a visible reflow on launch).
+        try:
+            ctk.set_widget_scaling(float((self.app_state.config or {}).get("ui_scale", 1.0) or 1.0))
+        except (TypeError, ValueError):
+            pass  # a hand-edited non-numeric ui_scale shouldn't block startup
         # apply the saved hover-tooltip preference before any card/chip is built (gate is a module flag)
         tooltip.set_enabled(bool((self.app_state.config or {}).get("show_tooltips", True)))
 
         self.grid_columnconfigure(1, weight=1)
         self.grid_rowconfigure(0, weight=1)
 
-        self.nav = ctk.CTkFrame(self, width=160, corner_radius=0)
+        # the rail is the app's one full-height block of oxblood: it frames everything, and the
+        # buttons on it are a lighter step of the same red so they still read as raised.
+        self.nav = ctk.CTkFrame(self, width=160, corner_radius=0, fg_color=theme.RAIL)
         self.nav.grid(row=0, column=0, sticky="nsw")
         self.nav.grid_propagate(False)  # keep the rail a fixed width regardless of button text
 
@@ -89,6 +105,17 @@ class App(ctk.CTk):
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(200, self._maybe_first_run_scrape)  # let the window settle before any prompt
+        self.after(400, self._prewarm_library)         # ...and paint before we take cpu for icons
+        self.after(1500, self._check_updates_on_launch)  # background app-update check, silent on fail
+
+    def _prewarm_library(self):
+        """decode the icon thumbnails on a worker thread, so the first scroll through the library
+        never waits on a png (see Library.prewarm). deferred until after the first paint: kicked off
+        during the build it competes with the main thread for ~400ms of it, and nothing needs a
+        thumbnail until the user scrolls."""
+        lib = self.app_state.library
+        if lib is not None:
+            lib.prewarm()
 
     # window chrome
     def _set_app_user_model_id(self):
@@ -96,7 +123,7 @@ class App(ctk.CTk):
         our windows together. windows-only, harmless elsewhere."""
         try:
             import ctypes
-            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("dbdbp.autospender")
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("dbdbp-pas.autospender")
         except Exception:
             pass
 
@@ -119,8 +146,10 @@ class App(ctk.CTk):
             pass
 
     def _build_nav(self):
-        ctk.CTkLabel(self.nav, text="dbdbp", font=theme.FONT_TITLE).pack(
-            padx=theme.PAD, pady=(theme.PAD * 2, theme.PAD * 2)
+        # the brand mark is a real bloodweb, drawn from the detector's own lattice (see emblem.py).
+        BloodwebMark(self.nav, size=124).pack(padx=theme.PAD, pady=(theme.PAD * 2, 4))
+        ctk.CTkLabel(self.nav, text="dbdbp-pas", font=theme.FONT_TITLE).pack(
+            padx=theme.PAD, pady=(0, theme.PAD * 2)
         )
         for key, label in self.NAV:
             b = ctk.CTkButton(self.nav, text=label, anchor="w",
@@ -133,10 +162,15 @@ class App(ctk.CTk):
         self.nav_buttons["debug"] = self.debug_btn
         self.refresh_nav()
 
-        # pinned to the bottom of the rail: fetch/refresh the wiki icon library (the whole app needs
-        # it before it can match or show anything). debug still has the --force variant.
+        # pinned to the bottom of the rail. packed side=bottom in this order, so the first packed
+        # ("Update icons") sits lowest and the app self-updater sits just above it.
+        #   Update icons  -> fetch/refresh the wiki icon library (needed before we can match/show).
+        #   Check updates -> check github for a newer build of the app itself, install with consent.
         self.update_btn = ctk.CTkButton(self.nav, text="⟳ Update icons", command=self._update_icons)
         self.update_btn.pack(side="bottom", fill="x", padx=theme.PAD, pady=(4, theme.PAD))
+        self.update_check_btn = ctk.CTkButton(self.nav, text="⭳ Check for updates",
+                                              command=self._check_updates)
+        self.update_check_btn.pack(side="bottom", fill="x", padx=theme.PAD, pady=4)
 
     def refresh_nav(self):
         """show the Debug nav button only when debugging is enabled in the config."""
@@ -152,6 +186,7 @@ class App(ctk.CTk):
         self.screens["priorities"] = PrioritiesScreen(self.content, self)
         self.screens["settings"] = SettingsScreen(self.content, self)
         self.screens["run"] = RunScreen(self.content, self)
+        self.screens["instructions"] = InstructionsScreen(self.content, self)
         self.screens["debug"] = DebugScreen(self.content, self)
         for s in self.screens.values():
             s.grid(row=0, column=0, sticky="nsew")  # stacked; show() raises one
@@ -165,6 +200,54 @@ class App(ctk.CTk):
         scr = self.screens.get("priorities")
         if scr is not None:
             scr.refresh_after_scrape()
+
+    # app self-update
+    def _check_updates_on_launch(self):
+        """silent background check on startup: only nag if there's genuinely a newer release, and
+        stay quiet on any network/api error so a fresh launch offline never throws a dialog."""
+        updater.check_async(self, self._on_launch_update_checked)
+
+    def _on_launch_update_checked(self, info, err):
+        if err or not info or not info.get("newer"):
+            return  # offline, up to date, or no release -> say nothing on launch
+        self._prompt_update(info)
+
+    def _check_updates(self):
+        """manual "Check for updates" button: always gives feedback, even when already current."""
+        self.update_check_btn.configure(state="disabled", text="Checking…")
+        updater.check_async(self, self._on_manual_update_checked)
+
+    def _on_manual_update_checked(self, info, err):
+        self.update_check_btn.configure(state="normal", text="⭳ Check for updates")
+        if err:
+            messagebox.showerror("update check failed", err)
+            return
+        if not info or not info.get("newer"):
+            messagebox.showinfo(
+                "up to date",
+                f"You're on the latest version ({updater.current_version()}).")
+            return
+        self._prompt_update(info)
+
+    def _prompt_update(self, info):
+        """ask before downloading anything. when frozen we can self-install; from source we can only
+        point at the download page."""
+        if not updater.install_supported():
+            if info.get("page") and messagebox.askyesno(
+                "update available",
+                f"A new version ({info['tag']}) is available (you have "
+                f"{updater.current_version()}).\n\nSelf-install only works in the packaged app. "
+                "Open the download page?",
+            ):
+                webbrowser.open(info["page"])
+            return
+        if messagebox.askyesno(
+            "update available",
+            f"A new version ({info['tag']}) is available (you have {updater.current_version()}).\n\n"
+            "Download and install it now? The app will update itself and restart — you don't need "
+            "to do anything.",
+        ):
+            updater.download_and_install(self, info)
 
     def _maybe_first_run_scrape(self):
         """on a fresh install the index is absent and the library loads empty; offer to fetch it."""
@@ -186,7 +269,7 @@ class App(ctk.CTk):
         self.screens[key].tkraise()
         self._active = key
         for k, b in self.nav_buttons.items():
-            b.configure(fg_color=theme.NAV_ACTIVE_COLOR if k == key else "transparent")
+            b.configure(fg_color=theme.ACCENT if k == key else "transparent")
 
     def _on_close(self):
         """stop the spend loop (if running) before tearing down, so no clicker thread leaks."""

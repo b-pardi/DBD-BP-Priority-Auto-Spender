@@ -37,8 +37,10 @@ class PrioritiesScreen(ctk.CTkFrame):
             self.profiles = {config_io.DEFAULT_PROFILE: spender.copy_tiers(cfg.get("priorities", []))}
         self.active = cfg.get("active_profile") or next(iter(self.profiles))
 
-        self.grid_columnconfigure(0, weight=1)
-        self.grid_columnconfigure(1, weight=1)
+        # split ~35/65 (was 50/50): the divider sits 30% further left so the priority/tier pane on
+        # the right gets the extra room, while the library search pane on the left stays usable.
+        self.grid_columnconfigure(0, weight=35)
+        self.grid_columnconfigure(1, weight=65)
         self.grid_rowconfigure(0, weight=1)
 
         self._ensure_library()
@@ -80,8 +82,8 @@ class PrioritiesScreen(ctk.CTkFrame):
             command=lambda v: self._apply_filter())
         self.rarity.set("all")
         self.rarity.pack(side="left", padx=(0, theme.PAD))
-        # killer/survivor split: only perks/items/powers carry a role, so add-ons + offerings (null
-        # role) stay visible under either pick (see Library.filter). populated by the role scrape.
+        # killer/survivor split: strict, a pick shows only that side's glyphs (perks/items/powers by
+        # role, add-ons by side); offerings + no-side rows show only under "all" (see Library.filter).
         self.role = ctk.CTkOptionMenu(
             bar, width=110, values=["all", "killer", "survivor"],
             command=lambda v: self._apply_filter())
@@ -141,20 +143,33 @@ class PrioritiesScreen(ctk.CTkFrame):
         ctk.CTkButton(bar, text="+ new", width=64, command=self._new_profile).pack(side="left")
         ctk.CTkButton(bar, text="rename", width=64, command=self._rename_profile).pack(
             side="left", padx=theme.PAD)
-        ctk.CTkButton(bar, text="delete", width=64, fg_color="#a83232",
+        ctk.CTkButton(bar, text="delete", width=64, fg_color=theme.DANGER,
+                      hover_color=theme.DANGER_HOVER,
                       command=self._delete_profile).pack(side="left")
 
     # library wiring
     def _make_card(self, master, height):
-        return ItemCard(master, self.library, height=height, on_activate=self._on_card)
+        # on_drop/on_drag_hover read self.tiers lazily (cards are built on first relayout, after the
+        # right pane exists), so a dragged card can land on a specific tier at a specific position.
+        return ItemCard(master, self.library, height=height, on_activate=self._on_card,
+                        on_drop=self._on_card_drop,
+                        on_drag_hover=lambda x, y: self.tiers.drag_highlight(x, y))
+
+    @staticmethod
+    def _row_to_rule(row):
+        rule = {"type": "item", "name": row.get("name")}
+        if row.get("rarity"):
+            rule["rarity"] = row["rarity"]   # default to the card's rarity, toggleable on the chip
+        return rule
 
     def _on_card(self, row, button):
         if button != 1:
             return
-        rule = {"type": "item", "name": row.get("name")}
-        if row.get("rarity"):
-            rule["rarity"] = row["rarity"]   # default to the card's rarity, toggleable on the chip
-        self.tiers.add_rule(rule)
+        self.tiers.add_rule(self._row_to_rule(row))   # plain click -> add to the selected tier
+
+    def _on_card_drop(self, row, x_root, y_root):
+        # dragged from the library onto a tier: add at the drop position on whichever tier it landed.
+        self.tiers.drop_item_rule(self._row_to_rule(row), x_root, y_root)
 
     def _add_category_rule(self, rule):
         self.tiers.add_rule(rule)

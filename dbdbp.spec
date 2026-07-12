@@ -4,7 +4,9 @@
 #   pip install pyinstaller
 #   pyinstaller dbdbp.spec
 # onedir (a folder), not onefile: onefile re-unpacks tens of MB to a temp dir every launch.
-# nothing icon-related ships, the wiki library + ncc/cnn caches build into %APPDATA%/dbdbp on first run.
+# nothing icon-related ships, the wiki library + ncc/cnn caches build into %APPDATA%/dbdbp-pas on first run.
+# the exe + onedir folder are named dbdbp-pas; the %APPDATA% data dir is dbdbp-pas too, migrated
+# in place from the old 'dbdbp' folder on first launch (see paths.user_base).
 
 import os
 import sys
@@ -74,7 +76,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="dbdbp",
+    name="dbdbp-pas",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -88,5 +90,5 @@ coll = COLLECT(
     a.datas,
     strip=False,
     upx=False,
-    name="dbdbp",
+    name="dbdbp-pas",
 )

@@ -1,8 +1,9 @@
 """debug / capture view: the annotated detector frame plus a maintenance group.
 
-the left panel renders detect.draw_detections() frames (numpy bgr -> PIL -> CTkImage -> label), fed by
-a worker thread through a single-slot queue and drained on the main thread with after() (Tk is not
-thread-safe). the run loop / a debug grab pushes the newest frame via push_frame.
+the left panel renders detect.draw_detections() frames (numpy bgr -> PIL -> ImageTk -> a scrollable
+tk.Canvas), fed by a worker thread through a single-slot queue and drained on the main thread with
+after() (Tk is not thread-safe). the run loop / a debug grab pushes the newest frame via push_frame.
+the canvas has both scrollbars so a zoomed frame can be panned on either axis.
 
 the right panel is maintenance the user asked for: open/clear the cache folder, open/clear the debug
 output folder, and run the scraper (with a --force checkbox, off by default). clears are scoped to
@@ -14,17 +15,21 @@ import os
 import queue
 import threading
 import time
+import tkinter as tk
 
 import customtkinter as ctk
 import cv2
-from PIL import Image
+from PIL import Image, ImageTk
 
-from src import paths, scraper
+from src import paths
+
+# src.scraper pulls in requests (~300ms) and is only needed once a scrape actually starts, so it's
+# imported in the worker (see _scrape_worker) rather than at ui startup.
 
 from .. import theme
 
-IMG_MAX = (900, 680)  # cap the rendered frame so a 3440x1440 grab fits the panel
-ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 25, 400, 25  # percent, native-resolution zoom range
+IMG_MAX = (900, 680)  # cap the fit view so a 3440x1440 grab fits the panel
+ZOOM_MIN, ZOOM_MAX, ZOOM_STEP = 10, 400, 25  # percent of native; min is low so a small fit can zoom out
 
 
 class DebugScreen(ctk.CTkFrame):
@@ -34,10 +39,14 @@ class DebugScreen(ctk.CTkFrame):
         self._frame_q = queue.Queue(maxsize=1)  # newest annotated frame only
         self._status_q = queue.Queue(maxsize=1)  # newest ocr'd run status (bp/level/prestige)
         self._log_q = queue.Queue()
-        self._ctk_img = None       # keep a ref so the CTkImage isn't garbage-collected
+        self._tk_img = None        # keep a ref so the canvas PhotoImage isn't garbage-collected
         self._scraping = False
         self._last_frame = None    # newest raw bgr frame, kept full-res for zoom/save
-        self._zoom_pct = 100       # 100 = fit-to-panel; else native-resolution percent
+        # zoom is always a real percent of native. _fit=True re-derives that percent to fit the panel
+        # on each frame (and the % is shown), so zooming in/out steps from the actual fit scale rather
+        # than jumping as if the fit view were 100%.
+        self._fit = True
+        self._zoom_pct = 100       # real percent of native; recomputed while _fit is on
 
         self.grid_rowconfigure(0, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -92,15 +101,41 @@ class DebugScreen(ctk.CTkFrame):
             toolbar, text="OCR: prestige — · level — · bp —", font=theme.FONT_SMALL)
         self.status_label.pack(side="right", padx=theme.PAD)
 
-        self.image_viewport = ctk.CTkScrollableFrame(left)
-        self.image_viewport.grid(row=2, column=0, sticky="nsew", padx=theme.PAD, pady=(0, theme.PAD))
-        self.image_label = ctk.CTkLabel(
-            self.image_viewport, text="(no frame yet — start a run with debugging on)",
-            font=theme.FONT_BODY)
-        self.image_label.pack()
-        # ctrl+wheel (or plain wheel) over the frame zooms in/out instead of scrolling.
-        self.image_label.bind("<MouseWheel>", self._on_mousewheel)
-        self.image_viewport.bind("<MouseWheel>", self._on_mousewheel)
+        # a plain tk.Canvas (not CTkScrollableFrame, which only scrolls one axis) so a zoomed frame
+        # can be panned horizontally and vertically. the frame is drawn as one ImageTk image; the
+        # scrollregion tracks its rendered size, so the bars engage exactly when it overflows.
+        canvas_wrap = ctk.CTkFrame(left, fg_color="transparent")
+        canvas_wrap.grid(row=2, column=0, sticky="nsew", padx=theme.PAD, pady=(0, theme.PAD))
+        canvas_wrap.grid_rowconfigure(0, weight=1)
+        canvas_wrap.grid_columnconfigure(0, weight=1)
+        self.canvas = tk.Canvas(canvas_wrap, highlightthickness=0, bd=0,
+                                background=self._canvas_bg())
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        vbar = ctk.CTkScrollbar(canvas_wrap, orientation="vertical", command=self.canvas.yview)
+        vbar.grid(row=0, column=1, sticky="ns")
+        hbar = ctk.CTkScrollbar(canvas_wrap, orientation="horizontal", command=self.canvas.xview)
+        hbar.grid(row=1, column=0, sticky="ew")
+        self.canvas.configure(yscrollcommand=vbar.set, xscrollcommand=hbar.set)
+        self._tk_img = None  # ImageTk.PhotoImage, kept so the canvas image isn't gc'd
+        self._show_placeholder()
+        # wheel over the frame: plain = pan vertically, shift = pan horizontally, ctrl = zoom (the
+        # +/-/Fit buttons zoom too, so the gesture is a convenience not the only way).
+        self.canvas.bind("<MouseWheel>", self._on_wheel_pan)
+        self.canvas.bind("<Shift-MouseWheel>", self._on_wheel_hpan)
+        self.canvas.bind("<Control-MouseWheel>", self._on_wheel_zoom)
+
+    @staticmethod
+    def _canvas_bg():
+        """the current-theme CTkFrame fill, so the raw tk canvas blends with the ctk chrome."""
+        fg = ctk.ThemeManager.theme["CTkFrame"]["fg_color"]
+        return fg[0 if ctk.get_appearance_mode() == "Light" else 1]
+
+    def _show_placeholder(self):
+        """clear the canvas to the 'no frame yet' hint (before the first frame arrives)."""
+        self.canvas.delete("all")
+        self.canvas.create_text(16, 16, anchor="nw", fill="gray",
+                                text="(no frame yet — start a run with debugging on)")
+        self.canvas.configure(scrollregion=(0, 0, 0, 0))
 
     def _build_maintenance(self):
         right = ctk.CTkFrame(self, width=340)
@@ -111,10 +146,13 @@ class DebugScreen(ctk.CTkFrame):
 
         cache = ctk.CTkFrame(right)
         cache.pack(fill="x", padx=theme.PAD, pady=theme.PAD)
-        ctk.CTkLabel(cache, text="Cache (ncc templates + thumbnails)", font=theme.FONT_SMALL).pack(
+        ctk.CTkLabel(cache, text="Cache (regenerable match templates)", font=theme.FONT_SMALL).pack(
             anchor="w", padx=theme.PAD, pady=(theme.PAD, 0))
+        ctk.CTkLabel(cache, text="everything in this folder rebuilds on demand — safe to delete",
+                     font=theme.FONT_SMALL, text_color="gray", justify="left", wraplength=300).pack(
+            anchor="w", padx=theme.PAD, pady=(0, 2))
         ctk.CTkButton(cache, text="Open cache folder",
-                      command=lambda: self._open(paths.cache_dir())).pack(
+                      command=lambda: self._open(paths.template_cache_dir())).pack(
             fill="x", padx=theme.PAD, pady=2)
         ctk.CTkButton(cache, text="Clear cache", command=self._clear_cache).pack(
             fill="x", padx=theme.PAD, pady=(2, theme.PAD))
@@ -183,21 +221,37 @@ class DebugScreen(ctk.CTkFrame):
             self._last_frame = bgr
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
-        if self._zoom_pct == 100:
-            pil.thumbnail(IMG_MAX, Image.LANCZOS)  # "fit" view: shrink to the panel, never upscale
+        w, h = pil.size
+        if self._fit:
+            # scale so the frame fits the panel cap without upscaling, and record that as the current
+            # percent so a later zoom-in/out steps from the real fit scale (e.g. 30%), not from 100%.
+            scale = min(IMG_MAX[0] / w, IMG_MAX[1] / h, 1.0)
+            self._zoom_pct = max(ZOOM_MIN, round(scale * 100))
         else:
-            w, h = pil.size
             scale = self._zoom_pct / 100
-            pil = pil.resize((max(1, int(w * scale)), max(1, int(h * scale))), Image.LANCZOS)
-        self._ctk_img = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
-        self.image_label.configure(image=self._ctk_img, text="")
+        disp = pil.resize((max(1, round(w * scale)), max(1, round(h * scale))), Image.LANCZOS)
+        self._tk_img = ImageTk.PhotoImage(disp)
+        self.canvas.delete("all")
+        self.canvas.create_image(0, 0, anchor="nw", image=self._tk_img)
+        self.canvas.configure(scrollregion=(0, 0, disp.width, disp.height))
+        self._update_zoom_label()
 
     # zoom controls
+    def _update_zoom_label(self):
+        if self._fit and self._last_frame is None:
+            self.zoom_label.configure(text="Fit")   # no frame yet, no real percent to show
+        else:
+            self.zoom_label.configure(
+                text=f"{self._zoom_pct}%" + (" (fit)" if self._fit else ""))
+
     def _set_zoom(self, pct):
+        # an explicit +/- or wheel zoom leaves fit mode and pins a concrete percent of native.
+        self._fit = False
         self._zoom_pct = max(ZOOM_MIN, min(ZOOM_MAX, pct))
-        self.zoom_label.configure(text="Fit" if self._zoom_pct == 100 else f"{self._zoom_pct}%")
         if self._last_frame is not None:
             self._render_frame(self._last_frame, keep=False)
+        else:
+            self._update_zoom_label()
 
     def _zoom_in(self):
         self._set_zoom(self._zoom_pct + ZOOM_STEP)
@@ -206,11 +260,24 @@ class DebugScreen(ctk.CTkFrame):
         self._set_zoom(self._zoom_pct - ZOOM_STEP)
 
     def _zoom_reset(self):
-        self._set_zoom(100)
+        # back to fit: re-derive the fit percent from the current frame on the next render.
+        self._fit = True
+        if self._last_frame is not None:
+            self._render_frame(self._last_frame, keep=False)
+        else:
+            self._update_zoom_label()
 
-    def _on_mousewheel(self, event):
+    def _on_wheel_pan(self, event):
+        self.canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def _on_wheel_hpan(self, event):
+        self.canvas.xview_scroll(-1 if event.delta > 0 else 1, "units")
+        return "break"
+
+    def _on_wheel_zoom(self, event):
         self._zoom_in() if event.delta > 0 else self._zoom_out()
-        return "break"  # swallow it so the scrollable frame doesn't also scroll on the same tick
+        return "break"
 
     def _save_frame(self):
         if self._last_frame is None:
@@ -231,18 +298,20 @@ class DebugScreen(ctk.CTkFrame):
             self._append_log(f"could not open {path}: {e}")
 
     def _clear_cache(self):
-        """delete the regenerable ncc template cache (*.npy) and drop the in-memory thumbnails.
-        leaves the sprites and the index untouched (in dev the cache dir is the repo data/)."""
+        """delete the regenerable match-template cache (*.npy ncc/embed banks + *.npz ring template)
+        and drop the in-memory thumbnails. the dedicated template dir holds only disposable files, so
+        the sprites, index, labels, and trained model (all in the data dir proper) are untouched."""
         n = 0
-        for p in paths.cache_dir().glob("*.npy"):
-            try:
-                p.unlink()
-                n += 1
-            except OSError:
-                pass
+        for pat in ("*.npy", "*.npz"):
+            for p in paths.template_cache_dir().glob(pat):
+                try:
+                    p.unlink()
+                    n += 1
+                except OSError:
+                    pass
         if self.app.app_state.library is not None:
             self.app.app_state.library.clear_thumbnail_cache()
-        self._append_log(f"cleared cache: {n} ncc file(s) + in-memory thumbnails")
+        self._append_log(f"cleared cache: {n} template file(s) + in-memory thumbnails")
 
     def _clear_debug(self):
         """delete saved debug images (*.png/*.jpg) in the debug dir. leaves any other files alone
@@ -268,6 +337,7 @@ class DebugScreen(ctk.CTkFrame):
 
     def _scrape_worker(self, force):
         try:
+            from src import scraper   # deferred: see the note by the imports
             categories = sorted(set(scraper.PREFIXES.values()))
             # log one line per stage change (not per icon) so the log shows progress without flooding
             last = {"stage": None}
@@ -282,8 +352,8 @@ class DebugScreen(ctk.CTkFrame):
                 progress=on_progress)
             self.log(f"scrape done: {len(index)} icons indexed"
                      + (f", {len(skipped)} skipped" if skipped else ""))
-            # the index changed: drop the ncc cache + thumbnails + the loaded library so they rebuild.
-            for p in paths.cache_dir().glob("*.npy"):
+            # the index changed: drop the template cache + thumbnails + the loaded library so they rebuild.
+            for p in paths.template_cache_dir().glob("*.npy"):
                 try:
                     p.unlink()
                 except OSError:

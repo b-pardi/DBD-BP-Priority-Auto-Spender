@@ -11,14 +11,17 @@ import tkinter.messagebox as messagebox
 
 import customtkinter as ctk
 
-from src import paths, scraper
+from src import paths
+
+# src.scraper pulls in requests (~300ms), and it's only needed once the user actually starts a
+# scrape -- which then runs for minutes -- so it's imported inside the worker, not at ui startup.
 
 
 def invalidate_caches(app):
     """drop the regenerable ncc template cache and reload the in-memory library against the fresh
     index. the Library object is kept (reloaded in place) so widgets holding a reference to it pick
     up the new rows without being rebuilt."""
-    for p in paths.cache_dir().glob("*.npy"):
+    for p in paths.template_cache_dir().glob("*.npy"):
         try:
             p.unlink()
         except OSError:
@@ -61,6 +64,7 @@ def run_scrape(app, force=False, on_done=None):
 
     def worker():
         try:
+            from src import scraper   # deferred: see the note by the imports
             cats = sorted(set(scraper.PREFIXES.values()))
             index, skipped = scraper.scrape(
                 cats, scraper.DEFAULT_OUT, scraper.DEFAULT_INDEX, force=force,

@@ -30,9 +30,13 @@ class RunScreen(ctk.CTkFrame):
 
         bar = ctk.CTkFrame(self)
         bar.grid(row=1, column=0, sticky="ew", padx=theme.PAD, pady=theme.PAD)
-        self.start_btn = ctk.CTkButton(bar, text="Start", width=110, command=self._start)
+        # start is the app's one primary action, so it gets the ember accent; stop is destructive,
+        # so it gets the only other tinted button in the app (see theme).
+        self.start_btn = ctk.CTkButton(bar, text="Start", width=110, fg_color=theme.ACCENT,
+                                       hover_color=theme.ACCENT_HOVER, command=self._start)
         self.start_btn.pack(side="left", padx=theme.PAD, pady=theme.PAD)
-        self.stop_btn = ctk.CTkButton(bar, text="Stop", width=90, fg_color="#a83232",
+        self.stop_btn = ctk.CTkButton(bar, text="Stop", width=90, fg_color=theme.DANGER,
+                                      hover_color=theme.DANGER_HOVER,
                                       command=self._stop)
         self.stop_btn.pack(side="left", padx=(0, theme.PAD), pady=theme.PAD)
         self.status = ctk.CTkLabel(bar, text="Idle", font=theme.FONT_BODY)

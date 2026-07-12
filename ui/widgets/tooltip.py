@@ -11,7 +11,7 @@ on save.
 
 import customtkinter as ctk
 
-from ..theme import FONT_SMALL
+from ..theme import BG_RAISED, BORDER, FONT_SMALL
 
 _enabled = True
 _tips = {}            # toplevel -> _TipWindow, one shared popup per top-level window
@@ -43,8 +43,8 @@ class _TipWindow:
         self.win.withdraw()
         self.win.overrideredirect(True)              # no title bar / border, just the box
         self.win.attributes("-topmost", True)
-        self.win.configure(fg_color=("gray60", "gray10"))   # 1px outer tint reads as a thin border
-        frame = ctk.CTkFrame(self.win, fg_color=("gray92", "gray18"), corner_radius=6)
+        self.win.configure(fg_color=BORDER)          # 1px outer tint reads as a thin border
+        frame = ctk.CTkFrame(self.win, fg_color=BG_RAISED, corner_radius=6)
         frame.pack(padx=1, pady=1)
         self.label = ctk.CTkLabel(frame, justify="left", wraplength=_TIP_WRAP, font=FONT_SMALL)
         self.label.pack(padx=8, pady=5)

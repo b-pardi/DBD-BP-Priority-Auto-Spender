@@ -39,7 +39,7 @@ REPICK_TOL_PX = 20   # spot-match tolerance for the don't-repick guard, tune wit
 PARK_TOL_PX = 25     # how far the cursor may drift from PARK_XY before a scan re-parks it
 PARK_FADE_S = 0.5    # post-re-park wait for a hovered tooltip to fade before the re-grab
 
-DEFAULT_CONFIG = paths.config_path()   # frozen-aware: repo config/ in dev, %APPDATA%/dbdbp when frozen
+DEFAULT_CONFIG = paths.config_path()   # frozen-aware: repo config/ in dev, %APPDATA%/dbdbp-pas when frozen
 VALID_CATEGORIES = {"item", "addon", "offering", "perk", "power"}
 VALID_RARITIES = {"common", "uncommon", "rare", "very rare", "ultra rare", "event"}
 
@@ -243,6 +243,8 @@ def load_config(path=None):
     # them and they default sanely on an older file. see ui.widgets.tooltip + ui.library.filter.
     cfg.setdefault("show_tooltips", True)
     cfg.setdefault("hide_unavailable", True)
+    # accessibility text/widget scale applied app-wide via ctk.set_widget_scaling. 1.0 = default size.
+    cfg.setdefault("ui_scale", 1.0)
     return cfg
 
 
@@ -613,7 +615,7 @@ class _FileTee:
 def _open_run_log():
     """open (append) the shared debug log in the debug dir, or None if it can't be written.
     one file across runs so the whole history is in one place to grep for recurring misreads
-    (dev: repo .tmp/spender-debug.log, frozen: %APPDATA%/dbdbp/debug/spender-debug.log)."""
+    (dev: repo .tmp/spender-debug.log, frozen: %APPDATA%/dbdbp-pas/debug/spender-debug.log)."""
     try:
         d = paths.debug_dir()
         d.mkdir(parents=True, exist_ok=True)

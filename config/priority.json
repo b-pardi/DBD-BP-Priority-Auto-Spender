@@ -138,7 +138,7 @@
       "ordered": true
     }
   ],
-  "debug": true,
+  "debug": false,
   "profiles": {
     "Flashy-Focused": [
       {
@@ -276,7 +276,54 @@
         "ordered": true
       }
     ],
-    "test": []
+    "template": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        }
+      ],
+      {
+        "rules": [
+          {
+            "type": "item",
+            "name": "Flashlight",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "focus Lens",
+            "rarity": "uncommon"
+          },
+          {
+            "type": "item",
+            "name": "high-End Sapphire Lens",
+            "rarity": "very rare"
+          }
+        ],
+        "ordered": true
+      },
+      {
+        "rules": [
+          {
+            "type": "item",
+            "name": "commodious Toolbox",
+            "rarity": "rare"
+          },
+          {
+            "type": "item",
+            "name": "grip Wrench",
+            "rarity": "rare"
+          },
+          {
+            "type": "item",
+            "name": "cutting Wire",
+            "rarity": "uncommon"
+          }
+        ],
+        "ordered": true
+      }
+    ]
   },
   "active_profile": "Flashy-Focused",
   "show_tooltips": true,
@@ -285,10 +332,16 @@
   "kill_key": "f8",
   "matcher": "cnn",
   "thresh_method": "adaptive_gaussian",
-  "settle_s": 1.7,
+  "settle_s": 1.6,
   "node_finder": "hough",
   "ocr_hover_s": 0.2,
-  "advance_s": 6.6,
+  "advance_s": 6.5,
   "pool_inferred": true,
-  "pool_exclusive": false
+  "pool_exclusive": false,
+  "auto_prestige": true,
+  "prestige_wait_s": 6.0,
+  "stop_prestige": 0,
+  "stop_level": 0,
+  "weak_match_fallback": true,
+  "ui_scale": 1.15
 }

@@ -1,13 +1,19 @@
-"""in-memory model of the icon library plus a lazy thumbnail cache.
+"""in-memory model of the icon library plus its thumbnail cache.
 
 rows come straight from data/icons_index.json (key, name, category, rarity, file) via
-detect.load_index, so the ui and the detector share one source of truth. thumbnails load lazily,
-downscaled to a small size, and are held in an LRU keyed by the sprite path, so we never keep ~1609
-full 256x256 sprites resident (that would be hundreds of MB). filtering is a plain predicate over
-the rows; the windowed list renders only the visible slice.
+detect.load_rows, so the ui and the detector share one source of truth. filtering is a plain
+predicate over the rows; the windowed list renders only the visible slice.
+
+thumbnails are downscaled to a small size and cached by sprite path. the whole library at 34px is
+only ~7mb of pixels, so we cache all of it rather than evicting: a bounded cache just meant scrolling
+the 1600-row list kept re-decoding sprites it had already seen (~1.9ms each, mostly png decode),
+which is what made scrolling feel sluggish. prewarm() does that decoding up front on a worker thread
+so the first scroll through is already warm -- PIL work is thread-safe, but tk objects are not, so
+the thread only produces PIL images and the CTkImage wrapper is built on the main thread (free,
+~1us) the first time a row is actually drawn.
 """
 
-from collections import OrderedDict
+import threading
 from pathlib import Path
 
 import customtkinter as ctk
@@ -20,31 +26,41 @@ from .theme import THUMB_PX
 
 
 class Library:
-    def __init__(self, rows=None, thumb_px=THUMB_PX, cache_size=400):
+    def __init__(self, rows=None, thumb_px=THUMB_PX):
         if rows is None:
-            rows, _ = detect.load_index()
+            rows = detect.load_rows()
         # drop the wiki's swapped-name duplicate uploads (e.g. flashlightSport vs sportFlashlight),
         # which otherwise show up twice: once as the canonical card and once as a bare icon with no
         # rarity or tooltip. done at the ui boundary so detection's positional row<->phash arrays are
         # untouched; a re-scrape persists the same dedup to the index file.
         self.rows = dedup_index_rows(rows)
         self.thumb_px = thumb_px
-        self.cache_size = cache_size
         # sprite "file" is relative to the index file's dir, the same base detect resolves against.
         self._base = Path(detect.DEFAULT_INDEX).parent
-        self._cache = OrderedDict()  # row["file"] -> CTkImage, LRU
+        self._cache = {}      # row["file"] -> CTkImage (main thread only)
+        self._pil = {}        # row["file"] -> PIL thumbnail, filled by the prewarm thread
+        self._prewarm = None  # the running prewarm thread, if any
+        self._reindex()
+
+    def _reindex(self):
+        """name-key -> row, so a placed chip finds its thumbnail without scanning all 1600 rows.
+        lookup_row used to be a linear scan folding every name with a regex, which cost ~1ms a call
+        and ran once per chip built."""
+        self._by_key = {}
+        for r in self.rows:
+            self._by_key.setdefault(normalize_name(r.get("name", "")), r)
 
     def filter(self, query="", category="all", rarity="all", role="all", show_unavailable=False):
         """rows matching the search box + dropdowns. case/punctuation-insensitive name search
         (folded like the detector via node.normalize_name), category exact, rarity exact with a
         'none' bucket for null-rarity rows (perks/powers/visceral).
 
-        role ('all'|'killer'|'survivor') filters by who plays the glyph. items (survivor), powers
-        (killer), and perks (per the wiki role categories) carry a role; add-ons instead carry a
-        `side` (whose power/item they belong to), so we fall back to that when role is absent.
-        offerings have neither on the wiki (and most suit either side), so they pass both filters
-        rather than being wrongly hidden. rows from an index predating these scrapes are all null
-        and likewise unaffected.
+        role ('all'|'killer'|'survivor') filters by who plays the glyph, strictly: a pick shows only
+        rows whose role/side is exactly that side. items (survivor), powers (killer), and perks (per
+        the wiki role categories) carry a role; add-ons instead carry a `side` (whose power/item they
+        belong to), so we fall back to that when role is absent. offerings (and any row with neither
+        field) have no side on the wiki, so a killer/survivor pick hides them; only 'all' shows them.
+        rows from an index predating the role/side scrape are all null and so only appear under 'all'.
 
         show_unavailable=False (the default) hides glyphs you can't buy in a current bloodweb:
         'event' (past-event skins) and 'unavailable' (killer powers, retired offerings). rows from
@@ -58,7 +74,7 @@ class Library:
                 continue
             if role != "all":
                 rr = r.get("role") or r.get("side")
-                if rr is not None and rr != role:
+                if rr != role:   # strict: no side (offerings/old rows) only shows under 'all'
                     continue
             if rarity == "none":
                 if r.get("rarity") is not None:
@@ -70,33 +86,58 @@ class Library:
             out.append(r)
         return out
 
+    # thumbnails
+    def _load_pil(self, fkey):
+        """decode one sprite to a thumbnail-sized PIL image. safe to call off the main thread."""
+        pil = Image.open(self._base / fkey)
+        if pil.mode != "RGBA":
+            pil = pil.convert("RGBA")
+        pil.thumbnail((self.thumb_px, self.thumb_px), Image.LANCZOS)
+        return pil
+
     def thumbnail(self, row):
-        """a small CTkImage for a row, cached LRU by sprite path. None if the sprite won't load.
-        created lazily at render time (a Tk root exists by then)."""
+        """a small CTkImage for a row, cached by sprite path. None if the sprite won't load.
+        the CTkImage is created lazily at render time (a Tk root exists by then); if prewarm has
+        already decoded the sprite this is just the wrapper, otherwise it decodes inline."""
         fkey = row.get("file")
         img = self._cache.get(fkey)
         if img is not None:
-            self._cache.move_to_end(fkey)
             return img
-        try:
-            pil = Image.open(self._base / fkey).convert("RGBA")
-        except Exception:
-            return None
-        pil.thumbnail((self.thumb_px, self.thumb_px), Image.LANCZOS)
+        pil = self._pil.get(fkey)
+        if pil is None:
+            try:
+                pil = self._load_pil(fkey)
+            except Exception:
+                return None
+            self._pil[fkey] = pil
         img = ctk.CTkImage(light_image=pil, dark_image=pil, size=pil.size)
         self._cache[fkey] = img
-        if len(self._cache) > self.cache_size:
-            self._cache.popitem(last=False)  # evict the least-recently-used
         return img
 
+    def prewarm(self):
+        """decode every sprite to a thumbnail on a worker thread, so scrolling never waits on a png.
+        idempotent and fire-and-forget: it only fills the PIL dict (no tk objects), a dict set is
+        atomic under the gil, and a row raced by thumbnail() just gets decoded twice. harmless."""
+        if self._prewarm is not None and self._prewarm.is_alive():
+            return
+
+        def work(rows):
+            for r in rows:
+                fkey = r.get("file")
+                if fkey in self._pil:
+                    continue
+                try:
+                    self._pil[fkey] = self._load_pil(fkey)
+                except Exception:
+                    pass  # missing/corrupt sprite: thumbnail() will return None for it
+
+        self._prewarm = threading.Thread(target=work, args=(list(self.rows),), daemon=True)
+        self._prewarm.start()
+
     def lookup_row(self, name):
-        """first index row whose name folds to the same key as `name`, or None.
+        """the index row whose name folds to the same key as `name`, or None.
         used by a placed item-rule chip to find its thumbnail + library rarity."""
-        nn = normalize_name(name)
-        for r in self.rows:
-            if normalize_name(r.get("name", "")) == nn:
-                return r
-        return None
+        return self._by_key.get(normalize_name(name))
 
     def lookup_rarity(self, name):
         """library rarity for an item name (None for perks/powers/visceral or unknown)."""
@@ -104,15 +145,17 @@ class Library:
         return row.get("rarity") if row else None
 
     def clear_thumbnail_cache(self):
-        """drop the in-memory thumbnail cache (used after a re-scrape changes the sprites)."""
+        """drop the cached thumbnails (used after a re-scrape changes the sprites)."""
         self._cache.clear()
+        self._pil.clear()
 
     def reload(self):
         """re-read the index from disk and drop cached thumbnails, in place.
         keeps the same Library object so widgets holding a reference (cards, chips) pick up the new
         rows without being rebuilt. used after a scrape, including the first-run one that fills an
         initially empty library."""
-        rows, _ = detect.load_index()
-        self.rows = dedup_index_rows(rows)
+        self.rows = dedup_index_rows(detect.load_rows())
         self._base = Path(detect.DEFAULT_INDEX).parent
-        self._cache.clear()
+        self.clear_thumbnail_cache()
+        self._reindex()
+        self.prewarm()

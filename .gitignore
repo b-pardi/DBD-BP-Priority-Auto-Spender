@@ -3,7 +3,6 @@ __pycache__/
 *.pyo
 .venv/
 *env/
-.vscode/
 
 # scraped icon library is large and fully regenerable from src/scraper.py
 data/icons/*
@@ -14,10 +13,11 @@ data/*.npy
 data/bw-bgs/*
 !data/bw-bgs/.gitkeep
 
-# ncc template cache, rebuilt on demand from the sprites by detect.load_ncc_templates
+# regenerable match-template cache (ncc/embed banks, ring presence template, eval renderbanks),
+# now kept in its own subfolder so the "cache" it holds is obvious; rebuilt on demand
+data/cache/
+# legacy locations (pre data/cache split), kept so old checkouts stay clean
 data/*.ncc*.npy
-
-# node presence template cache, self-built live from the user's own snapped detections
 data/ring-template.npz
 
 # saved bloodweb screenshots for offline tests can be large

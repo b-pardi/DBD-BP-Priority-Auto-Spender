@@ -11,6 +11,9 @@ channels:
 dependencies:
   - python=3.11
   - tesserocr
+  # openblas, not the default mkl: mkl is ~540MB of per-cpu kernel dlls that all get frozen into the
+  # build, and numpy here only does array work (opencv does the heavy lifting).
+  - libblas=*=*openblas
   - numpy
   - opencv
   - pillow

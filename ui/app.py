@@ -244,7 +244,7 @@ class App(ctk.CTk):
         if messagebox.askyesno(
             "update available",
             f"A new version ({info['tag']}) is available (you have {updater.current_version()}).\n\n"
-            "Download and install it now? The app will update itself and restart — you don't need "
+            "Download and install it now? The app will update itself and restart, you don't need "
             "to do anything.",
         ):
             updater.download_and_install(self, info)

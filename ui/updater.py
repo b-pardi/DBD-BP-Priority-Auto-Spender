@@ -28,6 +28,7 @@ import customtkinter as ctk
 
 from src import paths
 from src.version import __version__, REPO
+from .scrape_runner import style_child_window   # our icon + raised above the parent, see there
 
 # requests pulls in ~300ms and is only needed when the user actually checks/downloads, so it's
 # imported inside the worker functions, never at ui startup.
@@ -163,6 +164,7 @@ def download_and_install(app, info):
     win.title("Updating")
     win.geometry("440x160")
     win.transient(app)
+    style_child_window(win)
     win.protocol("WM_DELETE_WINDOW", lambda: None)  # no closing mid-download
     win.after(200, win.grab_set)
     ctk.CTkLabel(win, justify="left", text=f"Downloading {info['tag']}…").pack(
@@ -259,46 +261,69 @@ def _apply_and_restart(app, src_root, updir):
     install_dir = os.path.dirname(sys.executable)
     new_exe = os.path.join(install_dir, _payload_exe(src_root))   # post-swap name, may differ from ours
     old_exe = sys.executable
-    pid = os.getpid()
     log = updir / "update.log"
     bat = updir / "apply_update.bat"
 
-    # robocopy /MIR mirrors src onto the install dir (copies new, purges stale). /R:/W: retry while
-    # a file is briefly still locked as the process tears down. robocopy's exit code is a bitfield:
-    # 0-7 are degrees of success, >= 8 means at least one file genuinely failed to copy (a locked
-    # file, or no write permission if they installed somewhere like Program Files). on failure we
-    # still relaunch, but we KEEP the staging dir so update.log survives for a bug report -- the old
-    # script deleted it unconditionally, so a failed update looked exactly like a successful one.
-    # the (goto)+rmdir idiom lets cmd close and release the running .bat so the staging folder
-    # (including this script) can delete itself.
-    bat.write_text(
+    # only _internal gets /MIR (mirror + purge stale): pyinstaller owns every file in there. the
+    # install dir itself gets /E (add + overwrite, never delete) -- if someone extracted the exe loose
+    # into a folder holding their own files, /MIR aimed there would wipe them. and this swapper is the
+    # one that installs the NEXT release, so a wipe bug here is only fixable after the fact.
+    payload_internal = Path(src_root) / "_internal"
+    if payload_internal.is_dir():
+        copies = [
+            (str(payload_internal), os.path.join(install_dir, "_internal"), "/MIR"),
+            (str(src_root), install_dir, f'/E /XD "{payload_internal}"'),
+        ]
+    else:
+        copies = [(str(src_root), install_dir, "/E")]   # unfamiliar layout: copy, but never purge
+
+    # /R:/W: retry while a file is briefly still locked as we tear down. robocopy exit codes 0-7 are
+    # degrees of success, >= 8 means a file genuinely failed (locked, or no write perms in eg Program
+    # Files). cmd's `if errorlevel 8` is a >= test, so RC lands on 8 if any leg failed.
+    copy_lines = "".join(
+        f'robocopy "{s}" "{d}" {flags} /R:5 /W:2 /NP >> "{log}" 2>&1\r\n'
+        "if errorlevel 8 set RC=8\r\n"
+        for s, d, flags in copies
+    )
+
+    # the wait loop tries to open our own exe for append, which fails while we're still running, and
+    # retries via ping. it deliberately uses NO console builtins: this script runs windowless, and
+    # `tasklist | find` (pipe) and `timeout` (wants a console/stdin) both hang or die there.
+    # on failure we still relaunch, but KEEP the staging dir so update.log survives for a bug report.
+    # the (goto)+rmdir idiom lets cmd release the running .bat so the staging folder can delete itself.
+    script = (
         "@echo off\r\n"
         "setlocal\r\n"
         ":wait\r\n"
-        f'tasklist /FI "PID eq {pid}" 2>nul | find "{pid}" >nul\r\n'
-        "if not errorlevel 1 (\r\n"
-        "    timeout /t 1 /nobreak >nul\r\n"
-        "    goto wait\r\n"
-        ")\r\n"
-        f'robocopy "{src_root}" "{install_dir}" /MIR /R:5 /W:2 /NP >> "{log}" 2>&1\r\n'
-        "set RC=%ERRORLEVEL%\r\n"
+        "ping 127.0.0.1 -n 2 >nul\r\n"
+        f'2>nul (>>"{old_exe}" call ) || goto wait\r\n'
+        "set RC=0\r\n"
+        f"{copy_lines}"
         f'if exist "{new_exe}" (start "" "{new_exe}") else (start "" "{old_exe}")\r\n'
         "if %RC% GEQ 8 exit /b %RC%\r\n"
-        f'(goto) 2>nul & rmdir /s /q "{updir}"\r\n',
-        encoding="utf-8",
+        f'(goto) 2>nul & rmdir /s /q "{updir}"\r\n'
     )
+    # write_bytes, NOT write_text: text mode rewrites every \n to os.linesep, so our \r\n becomes
+    # \r\r\n, cmd reads the label as ":wait\r", `goto wait` finds nothing, and the script aborts
+    # before copying anything -- silently, since it has no console. encode as oem, the codepage cmd
+    # reads a .bat in, so a non-ascii windows username in these paths survives.
+    bat.write_bytes(script.encode("oem", errors="replace"))
 
     messagebox.showinfo(
         "installing update",
-        "The app will now close and reopen to finish updating. This takes a few seconds — you don't "
+        "The app will now close and reopen to finish updating. This takes a few seconds, you don't "
         "need to do anything.")
 
     try:
-        # DETACHED so it survives our exit; CREATE_NO_WINDOW so no console flashes.
+        # CREATE_NO_WINDOW alone: it still gives cmd a (windowless) console, which console tools need.
+        # DETACHED_PROCESS would leave it with NO console -- and it silently overrides CREATE_NO_WINDOW
+        # when both are passed. the swapper outlives us either way; windows doesn't kill children.
+        # std handles are DEVNULL because a windowed exe's own handles are invalid to inherit.
         subprocess.Popen(
             ["cmd", "/c", str(bat)],
-            creationflags=subprocess.DETACHED_PROCESS | subprocess.CREATE_NO_WINDOW,
+            creationflags=subprocess.CREATE_NO_WINDOW,
             close_fds=True,
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
     except Exception as e:
         messagebox.showerror("update failed", f"Could not launch the updater:\n{e}")

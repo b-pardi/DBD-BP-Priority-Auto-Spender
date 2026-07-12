@@ -12,7 +12,7 @@ import customtkinter as ctk
 
 from src import detect, spender
 
-from .. import config_io, theme
+from .. import config_io, scrape_runner, theme
 from ..library import Library
 from ..templates import TEMPLATE_LABELS, TIER_TEMPLATES
 from ..widgets.item_card import ItemCard
@@ -197,7 +197,10 @@ class PrioritiesScreen(ctk.CTkFrame):
         self.profile_menu.set(self.active)
 
     def _new_profile(self):
-        name = (ctk.CTkInputDialog(text="New profile name:", title="New profile").get_input() or "").strip()
+        # styled between construction and get_input(): the ctor returns before it blocks on the dialog
+        dlg = ctk.CTkInputDialog(text="New profile name:", title="New profile")
+        scrape_runner.style_child_window(dlg)
+        name = (dlg.get_input() or "").strip()
         if not name:
             return
         if name in self.profiles:
@@ -211,8 +214,9 @@ class PrioritiesScreen(ctk.CTkFrame):
         self._set_dirty(True)
 
     def _rename_profile(self):
-        new = (ctk.CTkInputDialog(
-            text=f"Rename {self.active!r} to:", title="Rename profile").get_input() or "").strip()
+        dlg = ctk.CTkInputDialog(text=f"Rename {self.active!r} to:", title="Rename profile")
+        scrape_runner.style_child_window(dlg)
+        new = (dlg.get_input() or "").strip()
         if not new or new == self.active:
             return
         if new in self.profiles:

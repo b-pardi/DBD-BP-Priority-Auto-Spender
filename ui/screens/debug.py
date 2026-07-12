@@ -148,7 +148,7 @@ class DebugScreen(ctk.CTkFrame):
         cache.pack(fill="x", padx=theme.PAD, pady=theme.PAD)
         ctk.CTkLabel(cache, text="Cache (regenerable match templates)", font=theme.FONT_SMALL).pack(
             anchor="w", padx=theme.PAD, pady=(theme.PAD, 0))
-        ctk.CTkLabel(cache, text="everything in this folder rebuilds on demand — safe to delete",
+        ctk.CTkLabel(cache, text="everything in this folder rebuilds on demand, safe to delete",
                      font=theme.FONT_SMALL, text_color="gray", justify="left", wraplength=300).pack(
             anchor="w", padx=theme.PAD, pady=(0, 2))
         ctk.CTkButton(cache, text="Open cache folder",

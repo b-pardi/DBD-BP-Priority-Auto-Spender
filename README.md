@@ -180,3 +180,6 @@ idk nothing special here it's a customtkinter python ui that I couldn't be fucke
 icon art, names, rarities, and descriptions come from [deadbydaylight.wiki.gg](https://deadbydaylight.wiki.gg). that data is used two ways: as reference material for training the glyph matching model, and shown directly in the ui so you can pick what to prioritize. big thanks to the wiki contributors, none of this works without them.
 
 the game assets themselves are © Behaviour Interactive. this is an unofficial fan tool, not affiliated with or endorsed by Behaviour Interactive or the wiki. no game files are bundled, the reference library is fetched from the wiki on first run.
+
+
+> Disclaimer: Claude Code was used to generate code the UI and shipping an exe, cuz that's boring shit I don't wanna do. Core functionality of dbdbp-pas was written by yours truly, and only used AI for occasional debugging. All AI generated code was reviewed by me before committing to a release

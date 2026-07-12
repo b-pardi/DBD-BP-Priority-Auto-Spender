@@ -398,7 +398,7 @@ class TierList(ctk.CTkScrollableFrame):
         seg.pack(side="left", padx=PAD)
         hint = ctk.CTkLabel(modebar, text="top = first pick", font=FONT_SMALL, text_color=ASH)
 
-        empty = ctk.CTkLabel(frame, text="(empty — click a library item or add a category rule)",
+        empty = ctk.CTkLabel(frame, text="(empty, click a library item or add a category rule)",
                              font=FONT_SMALL)
         return _TierBox(tier, frame, header_btn, seg, hint, empty)
 

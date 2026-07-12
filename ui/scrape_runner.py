@@ -7,11 +7,14 @@ thread-safe.
 """
 
 import threading
+import tkinter as tk
 import tkinter.messagebox as messagebox
 
 import customtkinter as ctk
 
 from src import paths
+
+ASSETS = paths.resource_path("ui/assets")  # bundled read-only asset, _MEIPASS/ui/assets when frozen
 
 # src.scraper pulls in requests (~300ms), and it's only needed once the user actually starts a
 # scrape -- which then runs for minutes -- so it's imported inside the worker, not at ui startup.
@@ -34,6 +37,56 @@ def invalidate_caches(app):
             app.app_state.library = None  # couldn't reload; force a fresh build on next use
 
 
+def apply_window_icon(win):
+    """give a child toplevel the app's icon instead of ctk's.
+
+    ctk stamps its OWN logo on every CTkToplevel 200ms after it's created, and only skips that if
+    iconbitmap() has already been called on the window (it checks a flag the method sets). so call
+    ours right away: it both wins that race and trips the flag. the titlebar color and window
+    background already match the main window without help, ctk applies the dark dwm titlebar in the
+    toplevel's __init__ and theme paints CTkToplevel's fg_color.
+    """
+    ico = ASSETS / "icon.ico"
+    try:
+        if ico.exists():
+            win.iconbitmap(str(ico))
+            return
+    except Exception:
+        pass
+    png = ASSETS / "icon.png"   # fallback if the .ico is missing or tk rejects it
+    try:
+        if png.exists():
+            win._icon_img = tk.PhotoImage(file=str(png))  # keep a ref so it isn't gc'd
+            win.iconphoto(False, win._icon_img)
+    except Exception:
+        pass
+
+
+def bring_to_front(win):
+    """raise a fresh CTkToplevel above the main window.
+
+    ctk withdraws + deiconifies the toplevel during init (that's how it repaints the titlebar in the
+    right color), and it can come back up *behind* the parent. a bare lift() is unreliable on windows
+    when the parent holds focus, so flip topmost on and straight back off: that forces the raise
+    without pinning the window there. deliberately no focus_force, it would pull focus off the entry
+    inside an input dialog.
+    """
+    try:
+        win.lift()
+        win.attributes("-topmost", True)
+        win.after(400, lambda: win.winfo_exists() and win.attributes("-topmost", False))
+    except Exception:
+        pass  # window already closed (a scrape that finished instantly); nothing to raise
+
+
+def style_child_window(win):
+    """the whole treatment for any toplevel we pop over the main window: our icon, not ctk's, and
+    raised above the parent instead of behind it. the 220ms delay lands after ctk's own titlebar
+    fiddling (a withdraw/deiconify at ~200ms) so the raise isn't immediately undone."""
+    apply_window_icon(win)
+    win.after(220, lambda: bring_to_front(win))
+
+
 def run_scrape(app, force=False, on_done=None):
     """pop a modal progress window and scrape the wiki icon library on a worker thread.
     on success, invalidates caches and calls on_done() on the main thread. returns the window."""
@@ -41,6 +94,7 @@ def run_scrape(app, force=False, on_done=None):
     win.title("Updating icon library")
     win.geometry("440x160")
     win.transient(app)
+    style_child_window(win)
     win.protocol("WM_DELETE_WINDOW", lambda: None)  # no closing mid-scrape
     win.after(200, win.grab_set)  # CTkToplevel needs to be viewable before grabbing
     ctk.CTkLabel(

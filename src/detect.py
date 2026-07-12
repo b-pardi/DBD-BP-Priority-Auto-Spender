@@ -17,7 +17,6 @@ from PIL import Image
 from . import paths
 from .resolution import Resolution
 
-ROOT = Path(__file__).resolve().parent.parent
 USR_HSV = paths.user_base() / "usr" / "rarity-HSVs.json"   # active anchors, evolve per web; user_base writable when frozen
 DEFAULT_INDEX = paths.cache_dir() / "icons_index.json"     # scraped library, cache_dir writable when frozen (first-run scrape)
 

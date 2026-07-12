@@ -7,7 +7,7 @@ nodes in the order you care about. you give it a priority list (specific items l
 level, buys the highest-priority nodes available, and when none of your priorities are
 present it clicks the center auto-spend to finish the level and move on.
 
-> notice: dbd runs easy anti-cheat in menus too. automated input is a ban-risk you're choosing to take on. dry-run mode (no input sent) is the default for testing.
+> notice: dbd runs easy anti-cheat in menus too, technically this is illegal, but similar projects have had no issues. So while I can't guarantee your safety, you'll live.
 >
 > note: run dbd in borderless (windowed fullscreen), not exclusive fullscreen. exclusive fullscreen returns black screen-captures, can swallow the synthesized clicks, and blocks the global kill-switch hotkey. borderless looks identical and makes capture, clicking, and the f7/f8 hotkeys all work.
 

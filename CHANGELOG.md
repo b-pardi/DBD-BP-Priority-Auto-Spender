@@ -1,5 +1,11 @@
 ## Changelog
 
+### v0.2.1-beta
+- fixed wiki scraper to grab new chapter items handling weird wiki quirks with those
+    - note also implicitly fixes `Toothy Torte` only showing as `10th anniversary`
+- fixed text norm for perks with '&' or accents
+
+
 ### v0.2.0-beta
 - Bloodweb prestige screen detection/automation
 - bloodpoint spend thresholding

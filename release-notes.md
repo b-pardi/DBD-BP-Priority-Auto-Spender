@@ -10,7 +10,7 @@ Flushed out details from the alpha build of the DBD Bloodweb Priority Auto-Spend
 3. Run `dbdbp.exe` from whatever folder you extracted it the zip into.
 4. View the 'Instructions' tab in the UI to get started.
 
-- **See [README.md](https://github.com/b-pardi/DBD-BP-Priority-Auto-Spender/blob/main/README.md) or [CHANGELOG.md]() for more details**
+- **See [README.md](https://github.com/b-pardi/DBD-BP-Priority-Auto-Spender/blob/main/README.md) or [CHANGELOG.md](https://github.com/b-pardi/DBD-BP-Priority-Auto-Spender/blob/main/CHANGELOG.md) for more details**
 
 > notice: dbd runs easy anti-cheat in menus too, technically this is illegal, but similar projects have had no issues. So while I can't guarantee your safety, you'll live.
 >

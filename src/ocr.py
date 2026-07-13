@@ -361,23 +361,52 @@ def _locate_tooltip(before, after):
 
 
 def _fold(rows):
-    """index lookup map, normalized name to row, built once and cached."""
+    """index lookup map, normalized name -> [rows], built once and cached.
+
+    a name can reach more than one row, so this maps to a list. canonical names are unique, but an
+    alias is shared whenever two items really do carry the same in-game name (chucky's and jason's
+    "Mirror Shards"), and the tooltip prints that bare name with no disambiguator -- so keep every
+    candidate and let the caller break the tie on the icon. canonical names are inserted first, so
+    they always rank ahead of a row that only matched on an alias.
+    """
     global _fold_cache
     if _fold_cache is None:
-        _fold_cache = {normalize_name(r["name"]): r for r in rows}
+        cache = {}
+        for r in rows:
+            cache.setdefault(normalize_name(r["name"]), []).append(r)
+        for r in rows:
+            for alias in r.get("aliases") or []:
+                hits = cache.setdefault(normalize_name(alias), [])
+                if r not in hits:
+                    hits.append(r)
+        cache.pop('', None)
+        _fold_cache = cache
     return _fold_cache
 
 
-def _match_name(lines, rows):
-    """the index row whose name matches one of the ocr'd lines, or None.
+def _pick(hits, prefer):
+    """one row out of an ambiguous name hit: the icon matcher's own pick when it is among them,
+    else the first (canonical-name hits are ordered ahead of alias-only ones).
+    two items that share a name still have different sprites, so when the tooltip can't tell them
+    apart the icon can."""
+    if prefer is not None and len(hits) > 1:
+        for r in hits:
+            if r.get("key") == prefer.get("key"):
+                return r
+    return hits[0]
+
+
+def _match_name(lines, rows, prefer=None):
+    """the index row whose name (or alias) matches one of the ocr'd lines, or None.
     tries an exact normalized hit first since the subhead and description lines never normalize
     to a name key, then a difflib pass for the noisier reads like the busy event headers.
+    prefer is the row the icon matcher already landed on; it only breaks ties (see _pick).
     """
     fold = _fold(rows)
     for ln in lines:
-        row = fold.get(normalize_name(ln))
-        if row:
-            return row
+        hits = fold.get(normalize_name(ln))
+        if hits:
+            return _pick(hits, prefer)
     keys = list(fold)
     best, best_ratio = None, 0.0
     for ln in lines:
@@ -388,7 +417,7 @@ def _match_name(lines, rows):
         if m:
             ratio = difflib.SequenceMatcher(None, nl, m[0]).ratio()
             if ratio > best_ratio:
-                best, best_ratio = fold[m[0]], ratio
+                best, best_ratio = _pick(fold[m[0]], prefer), ratio
     return best
 
 
@@ -425,7 +454,9 @@ def find_node_tooltip(node, frame, region, rows, hover_delay_s=None, resolution=
     if box is None:
         return node # tooltip never localized, leave the node for the rules to skip
     x, y, bw, bh = box
-    row = _match_name(read_tooltip(after[y:y + bh, x:x + bw]), rows)
+    # node.match (the icon matcher's pick) only serves to break a tie when the read name is
+    # ambiguous across rows; it never overrides a name the tooltip resolves outright.
+    row = _match_name(read_tooltip(after[y:y + bh, x:x + bw]), rows, prefer=node.match)
     if row:
         node.name = row["name"]
         node.match = row

@@ -15,6 +15,7 @@ identity (see ocr.find_node_tooltip), instead of guessing behind a plain confide
 
 from dataclasses import dataclass, field
 import re
+import unicodedata
 
 # socket geometry -> the game categories that shape can be (mirror of detect.NODE_SHAPE_DICT).
 # square can't split item vs addon by geometry alone, so that needs the icon match or ocr.
@@ -61,10 +62,36 @@ def normalize_name(s):
     """fold a name to lowercase alphanumerics for tolerant matching.
     mirrors the scraper's name-key convention so a rule's "Commodious Toolbox" matches the
     index name regardless of spacing, case, or punctuation.
+    accents fold to their base letter first: stripping non-ascii outright would drop the letter
+    entirely, so 'Déjà Vu' folded to 'djvu' and 'Zōri' to 'zri' and neither could ever match its own
+    wiki page (which is why those rows carried no rarity or description).
     returns '' for None or empty."""
     if not s:
         return ''
+    s = unicodedata.normalize('NFKD', s)
+    s = ''.join(c for c in s if not unicodedata.combining(c))
     return re.sub(r'[^a-z0-9]', '', s.lower())
+
+
+def row_names(row):
+    """every name a library row answers to, folded: its canonical name plus its aliases.
+
+    a row's aliases are the wiki's redirects to its article plus whatever we called it before that
+    article was resolved, so an old config rule ("Decisive Strike"), the community shorthand ("DS")
+    and the current name ("Will to Live") all land on the same row. an index predating the alias
+    scrape has no aliases field and simply answers to its one name."""
+    if not row:
+        return set()
+    names = [row.get('name')] + list(row.get('aliases') or [])
+    return {n for n in (normalize_name(x) for x in names) if n}
+
+
+def name_matches(query, row):
+    """does `query` name this row, by its canonical name or any alias?
+    the one place a name is resolved to a row, so a priority rule, the ui search box and an ocr
+    tooltip read all agree on what counts as a hit."""
+    q = normalize_name(query)
+    return bool(q) and q in row_names(row)
 
 
 def _phash_hamming(a, b):
@@ -310,7 +337,11 @@ class Node:
                 # don't toss a correct-but-weak icon match: fall back to it (ocr_failed set post-hover).
                 if not (self.ocr_failed and self.match is not None):
                     return False
-            return normalize_name(self.name) == normalize_name(rule["name"])
+            # the matched row's aliases count too, so a rule written against a perk's old name
+            # ("Decisive Strike") still fires on the row the wiki now calls "Will to Live". fall back
+            # to the bare name for a node with no matched row (the sim builds those).
+            return (name_matches(rule["name"], self.match)
+                    or normalize_name(self.name) == normalize_name(rule["name"]))
         if rule.get("type") == "category":
             return self.effective_category == rule["category"]
         return False
@@ -318,11 +349,13 @@ class Node:
 
 def _rule_row_indices(rows, rule):
     """indices of the library rows a single priority rule names.
-    an item rule -> every row whose name folds to the rule's name (rarity/alias variants of the same
-    icon); a category rule -> every row in that category. used to seed both pool modes."""
+    an item rule -> every row the name reaches, by its own name or an alias (rarity variants of the
+    same icon, an old licensed name, and the two killers who genuinely share an add-on name: a bare
+    "Mirror Shards" rule keeps both chucky's and jason's, since only one of them can be on the web in
+    front of you); a category rule -> every row in that category. seeds both pool modes."""
     if rule.get("type") == "item":
         target = normalize_name(rule.get("name"))
-        return [i for i, r in enumerate(rows) if normalize_name(r.get("name")) == target]
+        return [i for i, r in enumerate(rows) if target and target in row_names(r)]
     if rule.get("type") == "category":
         cat = rule.get("category")
         return [i for i, r in enumerate(rows) if r.get("category") == cat]

@@ -10,13 +10,27 @@ rarity isn't in the file metadata, so it's pulled in the same pass from the wiki
 (item/addon/offering only; perks/powers have none and stay null). it's a soft cross-check; detection
 reads rarity live from the on-screen disk color.
 
-one pass does it all: download (or reuse cached) -> normalize+phash -> annotate rarity -> dedup ->
-write. just `python -m src.scraper`.
+A FILENAME IS NOT AN IDENTITY, and most of what follows is that lesson. it is prefix-unstable (a new
+chapter's sprites land as raw T_UI_ uploads and gain a curated Icon* twin weeks later), case-unstable
+(IconAddon_VCR vs IconAddon_vcr), non-unique (chucky and jason both have a "Mirror Shards"), and
+often just wrong (the offering the game calls "Toothy Torte" ships as IconsFavors_10thAnniversary; a
+perk that lost its licence keeps its old filename, so IconPerks_decisiveStrike is now "Will to
+Live"). so a prefix is only ever a place to LOOK; what a sprite *is* comes from the wiki article it
+belongs to (resolve_articles), which is unique, stable, and the name the game's own tooltip prints.
+
+one pass does it all: enumerate (twins collapsed) -> resolve each sprite to its article -> key it
+(collision-safe) -> download (or reuse cached) -> normalize+phash -> annotate rarity -> aliases ->
+dedup -> write. just `python -m src.scraper`, or `--dry-run` to see what would change first.
 
 writes:
   data/icons/<category>/<key>.png   the raw sprite
-  data/icons_index.json             one row per icon: key, name, category, rarity, obtainable,
-                                    role, owner, side, desc, file, phash, url
+  data/icons_index.json             one row per icon: key, name, aliases, category, rarity,
+                                    obtainable, role, owner, side, desc, file, phash, url
+
+`aliases` are the other names a row answers to: the wiki's redirects to its article (old licensed
+names and the shorthand people type -- "Dying Light", "STBFL", "BBQ") plus the name its filename
+would have given it. they are matched, not just searched (node.row_names), which is what lets us
+correct a name without stranding the priority rule someone already wrote against the old one.
 
 obtainable ('normal'|'event'|'unavailable') + desc (the wiki lead-sentence tooltip) are pulled in the
 same pass: obtainability from the wiki's retired/event categories (+ powers by category), desc from
@@ -43,6 +57,7 @@ import json
 import os
 import re
 import time
+import unicodedata
 from collections import Counter
 from pathlib import Path
 
@@ -54,7 +69,7 @@ from tqdm import tqdm
 from urllib3.util.retry import Retry
 
 from . import paths
-from .node import dedup_index_rows
+from .node import dedup_index_rows, normalize_name
 
 API = "https://deadbydaylight.wiki.gg/api.php"
 
@@ -62,6 +77,9 @@ API = "https://deadbydaylight.wiki.gg/api.php"
 # double as a clean way to enumerate each category. the wiki also files some newer/special assets
 # under an inconsistent 'Icons' (extra s) prefix, so we enumerate those too (gold event offerings,
 # plus a batch of newer perks) or we'd silently miss them.
+#
+# a prefix is only ever a place to LOOK. it is not an identity: see resolve_articles, which decides
+# what a sprite actually is, so a file moving between prefixes changes nothing about its row.
 PREFIXES = {
     "IconPerks_": "perk",
     "IconItems_": "item",
@@ -70,17 +88,40 @@ PREFIXES = {
     "IconPowers_": "power",
     "IconsFavors_": "offering",   # Icons-variant prefix: special/event offerings (10thAnniversary, ...)
     "IconsPerks_": "perk",        # Icons-variant prefix: newer perks missing from IconPerks_
+    # raw unreal texture uploads. a new chapter lands on the wiki under these FIRST, and only when an
+    # editor gets round to it does the same sprite gain a curated Icon* copy under the same stem
+    # (T_UI_iconAddon_AmonsNecktie -> IconAddon_AmonsNecktie). without them a brand-new killer is
+    # invisible to prefix enumeration: jason (K43) shipped 20 add-ons and 3 perks and we had none of
+    # them, because aiprefix matches the START of a filename and 'IconAddon_' never matches
+    # 'T_UI_iconAddon_...'. the stem survives the move, so enumerate_icons can collapse the two.
+    "T_UI_iconAddon_": "addon",
+    "T_UI_iconItems_": "item",
+    "T_UI_iconPerks_": "perk",
+    "T_UI_iconsPerks_": "perk",
+    "T_UI_iconPowers_": "power",
+    "T_UI_iconFavors_": "offering",
+}
+
+# the not-yet-curated upload of a sprite. when both exist we take the curated twin (see enumerate_icons)
+RAW_PREFIX = "T_UI_"
+
+# extra names a row should answer to, for the rare thing the wiki has no redirect for. keyed by the
+# row's folded name (see _norm). aliases are SCRAPED (fetch_redirects) precisely so this doesn't
+# become another hand-maintained list that goes stale, so this stays an escape hatch, not a registry.
+EXTRA_ALIASES = {
+    # "toothytorte": ["birthday cake"],
 }
 
 # prefixes whose icons are the gold "event" disk tier; they carry no wiki rarity category, so tag
 # them 'event' directly (lets the soft cross-check + priority rules target them).
 EVENT_PREFIXES = {"IconsFavors_"}
 
-# event icons the curated Icon* prefixes don't cover: the newest event content is on the wiki only as
-# raw 'T_UI_' texture uploads (no curated IconItems_ redirect yet), so prefix enumeration never sees
-# it. list those explicitly by exact File: name -> (key, category), since the in-game names
-# ('Banquet ...') don't derive from the texture stem (identity is read from the glyph, so the key is
-# just a stable id). all tagged 'event'; add a line per new event icon and re-scrape to fetch + hash.
+# event icons pinned by hand, by exact File: name -> (key, category). the T_UI_ prefixes now enumerate
+# these too, so this is no longer what FINDS them (that hole is what let jason's whole kit go missing:
+# the same raw-upload convention, but nobody hand-listed a killer). what it still does is pin their
+# 'event' rarity, which no wiki category carries, and pin a stable key that existing configs name.
+# enumerate_icons skips anything listed here so they aren't scraped twice. their display name comes
+# from the article like everyone else's, so they read as 'Banquet Toolbox', not as a texture stem.
 EXTRA_EVENT_ICONS = {
     "T_UI_iconItems_toolbox_anniversary2026.png":     ("banquetToolbox",   "item"),
     "T_UI_iconItems_flashlight_anniversary2026.png":  ("banquetFlashlight", "item"),
@@ -275,6 +316,7 @@ def _index_one(session, url, key, name, category, rarity, obtainable, role,
         "owner": None,                       # add-on's item type / killer power, filled by fill_sources
         "side": None,                        # 'survivor' | 'killer' | None, filled by fill_sources
         "desc": "",                          # wiki lead sentence, filled by fill_descriptions
+        "aliases": [],                       # other names it answers to, filled by fill_aliases
         # relative to the index file so the library stays portable; detect resolves it
         # against index_path.parent
         "file": os.path.relpath(dest, index_path.parent).replace("\\", "/"),
@@ -307,43 +349,68 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
     # lookup, so skip the category calls unless perks are selected (items/powers go by category).
     _p("fetching perk roles")
     rolemap = fetch_perk_roles(session) if "perk" in categories else {}
-    index = []
-    skipped = []
-    for prefix, category in prefixes.items():
-        icons = list_icons(session, prefix, limit=limit)
-        for i, entry in enumerate(tqdm(icons, desc=category, unit="icon")):
-            key = Path(entry["name"][len(prefix):]).stem   # IconPerks_EyesOfBelmont.png -> EyesOfBelmont
-            name = prettify(key)
-            # event prefixes -> 'event' (gold tier, no wiki rarity category); else the wiki
-            # rarity, or null for perks/powers and ~visceral top-tier icons
-            rarity = "event" if prefix in EVENT_PREFIXES else rmap.get(category, {}).get(_norm(name))
-            obtainable = _obtainable(category, name, rarity, obmap)
-            role = _role(category, name, rolemap)
-            row = _index_one(session, entry["url"], key, name, category, rarity, obtainable, role,
-                             out_dir, index_path, force, delay, skipped)
-            if row:
-                index.append(row)
-            _p(f"downloading {category}", i + 1, len(icons))
+    # which articles are real buyable things, so an icon's fileusage can be filtered to candidates.
+    # reads the same (memoised) category listings as the three maps above, so it costs nothing.
+    _p("listing articles")
+    things = fetch_thing_titles(session)
+
+    # what each sprite IS, before we touch the network for images: the filename can't be trusted for
+    # identity (see resolve_articles), so the article decides both the row's name and, where two
+    # filenames collide, its key.
+    _p("listing icons")
+    files = enumerate_icons(session, prefixes, limit=limit)
+    articles, shared = resolve_articles(session, files, things, progress=progress)
+    keyed = assign_keys(files, articles)
+
+    index, skipped = [], []
+    aka = {}     # key -> (name the filename would have given it, article or None, articles sharing it)
+    for i, (fname, url, key, stem, prefix, category) in enumerate(
+            tqdm(keyed, desc="icons", unit="icon")):
+        article = articles.get(fname)
+        old = prettify(stem)
+        name = article or old            # the article is the in-game name; the stem is a fallback
+        aka[key] = (old, article, shared.get(fname, ()))
+        # event prefixes -> 'event' (gold tier, no wiki rarity category); else the wiki
+        # rarity, or null for perks/powers and ~visceral top-tier icons
+        rarity = "event" if prefix in EVENT_PREFIXES else rmap.get(category, {}).get(_norm(name))
+        obtainable = _obtainable(category, name, rarity, obmap)
+        role = _role(category, name, rolemap)
+        row = _index_one(session, url, key, name, category, rarity, obtainable, role,
+                         out_dir, index_path, force, delay, skipped)
+        if row:
+            index.append(row)
+        _p("downloading icons", i + 1, len(keyed))
 
     # explicit event icons the prefixes miss (raw T_UI_ textures); look them up by exact name
     # and tag 'event'. skip ones whose category wasn't requested so --categories stays honest.
+    # their key is pinned here (configs reference it), but the name still comes from the article, so
+    # they read as the game names them ('Banquet Toolbox') rather than as their texture stem.
     extras = {f: kc for f, kc in EXTRA_EVENT_ICONS.items() if kc[1] in categories}
     if extras:
         _p("downloading event icons")
         extra_urls = resolve_image_urls(session, list(extras))
+        extra_files = [(f, extra_urls[f], k, "", c, (f,))
+                       for f, (k, c) in extras.items() if f in extra_urls]
+        extra_articles, extra_shared = resolve_articles(session, extra_files, things)
         for fname, (key, category) in extras.items():
             url = extra_urls.get(fname)
             if url is None:                  # not found on the wiki (renamed/removed), log + skip
                 skipped.append(fname)
                 continue
-            obtainable = _obtainable(category, prettify(key), "event", obmap)
-            role = _role(category, prettify(key), rolemap)
-            row = _index_one(session, url, key, prettify(key), category, "event", obtainable, role,
+            article = extra_articles.get(fname)
+            old = prettify(key)
+            name = article or old
+            aka[key] = (old, article, extra_shared.get(fname, ()))
+            obtainable = _obtainable(category, name, "event", obmap)
+            role = _role(category, name, rolemap)
+            row = _index_one(session, url, key, name, category, "event", obtainable, role,
                              out_dir, index_path, force, delay, skipped)
             if row:
                 index.append(row)
 
-    # fill the wiki lead-sentence tooltips in one batched pass now that every row's name is known
+    # fill the wiki lead-sentence tooltips in one batched pass now that every row's name is known.
+    # rows now carry their real article title, so this hits for the ~33 that never matched a page
+    # before (and they pick up their rarity and role above for the same reason).
     fill_descriptions(session, index, progress=progress)
 
     # owner + side, last: owner is parsed from the add-on lead sentence (so it needs desc filled
@@ -351,9 +418,20 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
     _p("fetching item sources")
     fill_sources(index, fetch_survivor_item_types(session))
 
+    # the other names each row answers to (wiki redirects + the name its filename would have given
+    # it), so a rename never strands an existing priority rule.
+    _p("fetching aliases")
+    redirects = fetch_redirects(session, [a for _old, a, _s in aka.values() if a], progress=progress)
+    fill_aliases(index, aka, redirects)
+
     _p("writing index")
     if dedup:
         index = dedup_index_rows(index)
+    clashes = check_key_collisions(index)
+    if clashes:                          # assign_keys is meant to make this impossible; be loud
+        raise RuntimeError(
+            "two rows would share one sprite file: "
+            + "; ".join(f"{cat}/{folded} <- {keys}" for cat, folded, keys in clashes))
     index.sort(key=lambda row: (row["category"], row["key"]))
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -362,12 +440,26 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
 
 def _norm(name):
     """squash a name to lowercase alphanumerics so the wiki page 'Amanda's Letter' and our
-    prettified key 'Amandas Letter' compare equal."""
-    return re.sub(r"[^a-z0-9]", "", name.lower())
+    prettified key 'Amandas Letter' compare equal. the engine's fold (node.normalize_name), shared
+    on purpose so the library, the priority rules and an ocr tooltip all agree what a name is."""
+    return normalize_name(name)
+
+
+def _deaccent(s):
+    """'Zōri' -> 'Zori', so a wiki title can seed an ascii key."""
+    s = unicodedata.normalize("NFKD", s or "")
+    return "".join(c for c in s if not unicodedata.combining(c))
+
+
+_CATEGORY_CACHE = {}
 
 
 def category_members(session, cat_title):
-    """all page titles in a wiki category, paged via list=categorymembers (500/call)."""
+    """all page titles in a wiki category, paged via list=categorymembers (500/call).
+    memoised for the run: the rarity, event, role and 'is this a real thing' maps all read the same
+    category listings, and there's no sense paging each one twice per scrape."""
+    if cat_title in _CATEGORY_CACHE:
+        return _CATEGORY_CACHE[cat_title]
     out, cont = [], {}
     while True:
         params = {
@@ -378,6 +470,7 @@ def category_members(session, cat_title):
         data = session.get(API, params=params, timeout=30).json()
         out += [m["title"] for m in data.get("query", {}).get("categorymembers", [])]
         if "continue" not in data:
+            _CATEGORY_CACHE[cat_title] = out
             return out
         cont = data["continue"]
 
@@ -435,6 +528,327 @@ def _role(category, name, rolemap):
     if category == "perk":
         return rolemap.get(_norm(name))
     return None
+
+
+# the article categories that mean "this page IS a thing you can buy", as opposed to a hub page that
+# merely shows the icon (Perks, Achievements, the killer's own page). used to filter an icon's
+# fileusage down to real candidates. maps a category title word to our category name.
+_THING_CATEGORY_WORDS = [("Add-on", "addon"), ("Item", "item"), ("Offering", "offering")]
+
+
+def fetch_thing_titles(session):
+    """{article title: our category} for every wiki page that is an actual buyable thing.
+    built from the category listings the scrape already pulls (rarity, event, retired, perk role), so
+    it costs nothing extra (category_members is memoised)."""
+    things = {}
+    for our_cat, type_word in RARITY_TYPES.items():
+        for rar in RARITY_WORDS:
+            for title in category_members(session, f"{rar} {type_word}"):
+                things[title] = our_cat
+    for cat in EVENT_CATEGORIES + RETIRED_CATEGORIES:
+        our = next((c for word, c in _THING_CATEGORY_WORDS if word in cat), None)
+        for title in category_members(session, cat):
+            things.setdefault(title, our)
+    for role, cats in PERK_ROLE_CATEGORIES.items():
+        for cat in cats:
+            for title in category_members(session, cat):
+                things[title] = "perk"
+    return things
+
+
+def enumerate_icons(session, prefixes, limit=None):
+    """every icon worth scraping, as [(name, url, stem, prefix, category, twins)].
+
+    the wiki carries a new chapter's sprite twice for a while: the raw T_UI_ upload, and (once an
+    editor gets to it) a curated Icon* copy of the same image under the same stem. 38 of those exist
+    today, all from last chapter. that's one item found twice, so we download one -- the curated
+    name, since that's where the wiki settles -- and because the stem survives the move, the row's
+    key doesn't shift when the curated copy lands. that swap being a no-op is the whole point.
+
+    `twins` keeps BOTH filenames, and that matters more than it looks: the article links whichever
+    upload the editor happened to use, and it is usually the raw one. Kaneki's Satchel cites
+    T_UI_iconAddon_satchel; the curated IconAddon_satchel is embedded on no page at all. so resolving
+    a sprite to its article has to look under every name that sprite has, or the file we chose to
+    download resolves to nothing and silently keeps its filename-derived name.
+    """
+    found = {}
+    for prefix, category in prefixes.items():
+        for entry in list_icons(session, prefix, limit=limit):
+            if entry["name"] in EXTRA_EVENT_ICONS:
+                continue                       # handled explicitly below, with a pinned key + tag
+            stem = Path(entry["name"][len(prefix):]).stem
+            found.setdefault((category, stem), []).append((entry["name"], entry["url"], prefix))
+    out = []
+    for (category, stem), uploads in found.items():
+        # curated copy wins the download; a raw T_UI_ name only stands in until one exists. sorted so
+        # the choice never depends on which prefix happened to be enumerated first.
+        name, url, prefix = min(uploads, key=lambda u: (u[2].startswith(RAW_PREFIX), u[0]))
+        out.append((name, url, stem, prefix, category, tuple(u[0] for u in uploads)))
+    return out
+
+
+def fetch_file_usage(session, filenames, progress=None):
+    """{filename: [ns0 article titles that embed it]}, via prop=fileusage, batched 50 at a time.
+    the wiki renders item infoboxes from a lua module, so a page's icon isn't in its wikitext at all;
+    going backwards from the sprite is the only cheap way to find the article it belongs to."""
+    out = {}
+    for start in range(0, len(filenames), 50):
+        batch = filenames[start:start + 50]
+        cont = {}
+        while True:
+            params = {
+                "action": "query", "format": "json", "prop": "fileusage",
+                "fuprop": "title", "funamespace": "0", "fulimit": "500",
+                "titles": "|".join(f"File:{f}" for f in batch),
+            }
+            params.update(cont)
+            data = session.get(API, params=params, timeout=60).json()
+            # mediawiki normalizes titles (underscores -> spaces); map back to our exact filename
+            renamed = {n["to"]: n["from"] for n in data.get("query", {}).get("normalized", [])}
+            for pg in data.get("query", {}).get("pages", {}).values():
+                title = renamed.get(pg["title"], pg["title"])
+                fname = title.split(":", 1)[1].replace(" ", "_")
+                out.setdefault(fname, []).extend(
+                    u["title"] for u in pg.get("fileusage", []) or [])
+            if "continue" not in data:
+                break
+            cont = data["continue"]
+        if progress:
+            progress("resolving names", min(start + 50, len(filenames)), len(filenames))
+    return out
+
+
+# which icon filenames may belong to a row of each category, for the own-icon check below
+CATEGORY_FILE_RE = {
+    "addon":    r"Icons?Addon_",
+    "perk":     r"Icons?Perks_",
+    "item":     r"Icons?Items_",
+    "offering": r"Icons?Favors_",
+    "power":    r"Icons?Powers_",
+}
+
+_ARTICLE_ICON_CACHE = {}
+
+
+def _icon_stem(fname):
+    """the stem of an icon filename, whichever prefix it arrived under.
+
+    a sprite's curated Icon* copy and its raw T_UI_ upload share a stem -- that is what makes them
+    twins -- so comparing stems is how we confirm an article's icon is OUR file even while the
+    article still renders the other twin. comparing the raw filenames instead silently loses the
+    rename for every chapter mid-transition (kaneki's satchel, torture apparatus).
+    case-sensitive on purpose: mirrorShards and MirrorShards are two different add-ons.
+    """
+    for prefix in sorted(PREFIXES, key=len, reverse=True):
+        if fname.startswith(prefix):
+            return Path(fname[len(prefix):]).stem
+    return Path(fname).stem
+
+
+def article_icon(session, title, category):
+    """the icon file an article renders as ITS OWN, or None if it doesn't show exactly one.
+
+    this is the check that makes renaming safe, and it is worth the api call. fileusage only says a
+    sprite appears somewhere on a page, which is far too loose to identify anything: the Stake Out
+    page cites Hyperfocus, the Gnarled Compass page cites the Maps item it's an add-on for. trusting
+    that alone would rename 40 healthy rows onto other things' icons.
+
+    an article's own icon is the one it renders full-size in its lead section (a merely *referenced*
+    icon is served as a /thumb/), with a filename prefix matching the row's category. exactly one
+    such icon means the article is about that sprite; anything else, we don't rename.
+    """
+    hit = (title, category)
+    if hit in _ARTICLE_ICON_CACHE:
+        return _ARTICLE_ICON_CACHE[hit]
+    pat = re.compile(
+        r"/images/(thumb/)?((?:T_UI_)?" + CATEGORY_FILE_RE[category] + r"[^\"?/]+\.png)", re.I)
+    data = session.get(API, params={
+        "action": "parse", "page": title, "prop": "text", "section": "0", "format": "json",
+    }, timeout=30).json()
+    html = data.get("parse", {}).get("text", {}).get("*", "")
+    full = []
+    for tag in re.findall(r"<img[^>]+>", html):
+        m = pat.search(tag)
+        if m and not m.group(1):     # full-size render = the infobox sprite, not an inline citation
+            full.append(m.group(2))
+    uniq = list(dict.fromkeys(full))
+    icon = uniq[0] if len(uniq) == 1 else None
+    _ARTICLE_ICON_CACHE[hit] = icon
+    return icon
+
+
+def resolve_articles(session, files, things, progress=None):
+    """what each sprite actually IS: ({filename: article title}, {filename: [articles sharing it]}).
+
+    a filename is not an identity. it is case-unstable (IconAddon_VCR vs IconAddon_vcr), prefix-
+    unstable (a new chapter's T_UI_ upload gains a curated twin later), and routinely just wrong: the
+    offering the game calls "Toothy Torte" ships as IconsFavors_10thAnniversary, and a perk that lost
+    its licence keeps the old filename (IconPerks_decisiveStrike is now "Will to Live"). the article
+    is none of those things -- it is unique, it is stable, and it is what the game's tooltip says.
+
+    cheap first, careful only where it matters:
+      1. fileusage -> the articles embedding the sprite, kept only where the article is a real thing
+         (`things`) rather than a hub page.
+      2. take a candidate outright when its title folds to the filename stem: the name already agrees
+         with the file, so there is nothing to check. that's ~95% of rows, at no extra cost.
+      3. otherwise the file is claiming a name it doesn't look like -- exactly the case that must not
+         be guessed -- so confirm it against the article's own icon (article_icon) and drop it if
+         they disagree. a file we can't resolve keeps its filename-derived name, as it does today, so
+         nothing regresses.
+
+    a sprite can honestly belong to two articles: hillbilly's and bubba's "Begrimed Chains" are
+    different add-ons drawn with one icon, and the wiki gives each a page. one sprite can only be one
+    row, so it takes the first title (candidates are sorted, so the pick is stable) and answers to
+    the other as an alias.
+    """
+    # every name the sprite goes by, not just the one we chose to download (see enumerate_icons)
+    usage = fetch_file_usage(session, sorted({t for f in files for t in f[5]}), progress=progress)
+    out, shared = {}, {}
+    for i, (fname, _url, stem, _prefix, category, twins) in enumerate(files):
+        pages = {p for twin in twins for p in usage.get(twin, [])}
+        cands = sorted(p for p in pages if things.get(p) == category)
+        picks = [p for p in cands if _norm(p) == _norm(stem)]
+        if not picks and not cands:
+            # a brand-new chapter's pages aren't in the rarity/role categories yet (jason's perks
+            # aren't), so `things` can't nominate a candidate and we fall back to the pages
+            # themselves: an exact title match, else a title that merely CONTAINS the stem -- the
+            # game prefixes its hexes, so ScaredToDeath's page is "Hex: Scared to Death". a loose
+            # match like that can't be trusted on its own, so it still has to be confirmed on the
+            # article's own icon below.
+            picks = sorted(p for p in pages if _norm(p) == _norm(stem))
+            if not picks and _norm(stem):
+                cands = sorted(p for p in pages if _norm(stem) in _norm(p))[:8]
+
+        if not picks:
+            picks = [p for p in cands
+                     if _icon_stem(article_icon(session, p, category) or "") == stem]
+        if picks:
+            out[fname] = picks[0]
+            if len(picks) > 1:
+                shared[fname] = picks[1:]
+        if progress:
+            progress("confirming names", i + 1, len(files))
+    return out, shared
+
+
+def fetch_redirects(session, titles, progress=None):
+    """{article title: [titles that redirect to it]} -- the wiki's own record of a thing's other names.
+
+    this is where aliases come from, and why they're scraped rather than listed by hand: the
+    redirects to "Keep Them Waiting" are its pre-licence name ("Save the Best for Last") and what
+    players actually type ("STBFL"). batched 50 at a time.
+    """
+    out = {}
+    titles = sorted(set(titles))
+    for start in range(0, len(titles), 50):
+        batch = titles[start:start + 50]
+        cont = {}
+        while True:
+            params = {"action": "query", "format": "json", "prop": "redirects",
+                      "rdnamespace": "0", "rdlimit": "500", "titles": "|".join(batch)}
+            params.update(cont)
+            data = session.get(API, params=params, timeout=60).json()
+            for pg in data.get("query", {}).get("pages", {}).values():
+                out.setdefault(pg["title"], []).extend(
+                    r["title"] for r in pg.get("redirects", []) or [])
+            if "continue" not in data:
+                break
+            cont = data["continue"]
+        if progress:
+            progress("fetching aliases", min(start + 50, len(titles)), len(titles))
+    return out
+
+
+def _key_from_title(title):
+    """a stable index key from a wiki article title: "Mirror Shards (Playtime's Over)" ->
+    'mirrorShardsPlaytimesOver'. only used to break a filename collision (see assign_keys), i.e.
+    where the filename has already proven it can't identify anything and the article can."""
+    words = re.findall(r"[A-Za-z0-9]+", re.sub(r"['’]", "", _deaccent(title)))
+    if not words:
+        return "unnamed"
+    head, *rest = words
+    return head.lower() + "".join(w[:1].upper() + w[1:] for w in rest)
+
+
+def assign_keys(files, articles):
+    """key each enumerated icon, safely. returns [(name, url, key, stem, prefix, category)].
+
+    the key stays the filename stem, as it always was -- except where two DIFFERENT files in one
+    category have stems differing only by case. that happens: IconAddon_VCR vs IconAddon_vcr,
+    IconsPerks_Deadline vs IconPerks_deadline, and now chucky's IconAddon_mirrorShards vs jason's
+    T_UI_iconAddon_MirrorShards. it is not a T_UI artifact -- 7 of the 8 collisions today are between
+    two curated files, so this has been latent for a long time.
+
+    it matters because the sprite lands at data/icons/<category>/<key>.png and windows matches that
+    path case-insensitively: the two rows are then ONE file. the second download either clobbers the
+    first or is skipped as already-cached, both rows end up hashing identically, and dedup merges
+    them -- silently deleting an add-on. that is exactly what would have happened to jason's Mirror
+    Shards, which is a different sprite from chucky's (hamming 24).
+
+    so on a collision, identity falls back to the one thing that CAN tell them apart: the article.
+    two files with no article to separate them are the same sprite uploaded twice (the wiki does
+    this), and get a deterministic suffix so neither clobbers the other; phash dedup then drops the
+    duplicate at the end. sorting by stem keeps the outcome independent of enumeration order, so a
+    file arriving under a different prefix later doesn't reshuffle anyone's key.
+    """
+    groups = {}
+    for f in files:
+        groups.setdefault((f[4], f[2].casefold()), []).append(f)
+    out = []
+    for group in groups.values():
+        if len(group) == 1:
+            name, url, stem, prefix, category, _twins = group[0]
+            out.append((name, url, stem, stem, prefix, category))
+            continue
+        taken = {}
+        for name, url, stem, prefix, category, _twins in sorted(group, key=lambda f: f[2]):
+            title = articles.get(name)
+            key = _key_from_title(title) if title else stem
+            n = taken.get(key.casefold(), 0)
+            taken[key.casefold()] = n + 1
+            if n:                    # same article (or no article) as an earlier member: one sprite
+                key = f"{key}_{n}"   # uploaded twice. keep both files; dedup drops the copy.
+            out.append((name, url, key, stem, prefix, category))
+    return out
+
+
+def check_key_collisions(rows):
+    """rows that would share one sprite file, as [(category, folded key, [keys])]. empty is the
+    invariant assign_keys exists to hold; we assert it every scrape so this class of bug can never
+    go quiet again (it has been silently clobbering VCR/vcr and friends for a long time)."""
+    seen = {}
+    for r in rows:
+        seen.setdefault((r["category"], r["key"].casefold()), []).append(r["key"])
+    return [(cat, folded, keys) for (cat, folded), keys in seen.items() if len(keys) > 1]
+
+
+def fill_aliases(rows, aka, redirects):
+    """populate each row's `aliases` in place: every other name it should answer to.
+
+    four sources: the wiki's redirects to its article (old licensed names and the shorthand people
+    actually type -- "Dying Light", "DS", "BBQ"), any other article drawn with the same sprite
+    (bubba's vs hillbilly's "Begrimed Chains"), the name we'd have given it from its filename before
+    the article was resolved (so a priority list saved against "10th Anniversary" still finds Toothy
+    Torte), and EXTRA_ALIASES for the rare thing the wiki has no redirect for. an alias that folds to
+    the row's own name is dropped as noise.
+
+    aliases are matched, not merely searched: a rule, the ui search box and an ocr tooltip all read
+    them through node.row_names. that's what keeps existing configs working across a rename.
+    """
+    for r in rows:
+        old, article, shared = aka.get(r["key"], (None, None, ()))
+        names = list(shared or [])
+        names += list(redirects.get(article) or []) if article else []
+        if old:
+            names.append(old)
+        names += EXTRA_ALIASES.get(_norm(r["name"]), [])
+        seen, out = {_norm(r["name"])}, []
+        for n in names:
+            folded = _norm(n)
+            if folded and folded not in seen:
+                seen.add(folded)
+                out.append(n)
+        r["aliases"] = out
 
 
 # the wiki article whose item table enumerates every survivor item TYPE (Flashlights, Med-Kits,
@@ -560,6 +974,55 @@ def fill_descriptions(session, rows, progress=None):
         r["desc"] = descmap.get(_norm(r["name"]), "")
 
 
+def dry_run(categories, limit=None):
+    """report what a scrape would change, without downloading or writing anything.
+
+    the metadata passes only (no images), so it's quick. renames are the part worth eyeballing: an
+    icon is only renamed when the article self-renders that exact sprite, but this is where you'd
+    catch it if the wiki ever restructures and that check starts saying yes to the wrong thing.
+    """
+    session = _session()
+    prefixes = {p: c for p, c in PREFIXES.items() if c in categories}
+    things = fetch_thing_titles(session)
+    files = enumerate_icons(session, prefixes, limit=limit)
+    articles, shared = resolve_articles(session, files, things)
+    keyed = assign_keys(files, articles)
+    redirects = fetch_redirects(session, list(articles.values()))
+
+    renames, rekeys, unresolved = [], [], 0
+    for fname, _url, key, stem, _prefix, _cat in keyed:
+        article = articles.get(fname)
+        if not article:
+            unresolved += 1
+        elif _norm(article) != _norm(prettify(stem)):
+            renames.append((prettify(stem), article, fname))
+        if key != stem:
+            rekeys.append((stem, key, fname))
+
+    print(f"\n{len(files)} icons ({len(articles)} resolved to an article, {unresolved} not; "
+          f"an unresolved icon keeps its filename-derived name, as today)")
+
+    print(f"\nRENAMED to the name the game uses ({len(renames)}):")
+    for old, new, fname in sorted(renames, key=lambda r: r[1]):
+        print(f"  {old:34} -> {new:36} [{fname}]")
+
+    print(f"\nRE-KEYED to break a colliding filename ({len(rekeys)}):")
+    for stem, key, fname in sorted(rekeys):
+        print(f"  {stem:34} -> {key:36} [{fname}]")
+
+    aliased = {a: r for a, r in redirects.items() if r}
+    print(f"\nALIASES: {sum(len(v) for v in aliased.values())} wiki redirects over {len(aliased)} "
+          f"articles, plus each renamed row's old name.")
+    if shared:
+        print(f"  ({len(shared)} sprite(s) shared by two articles, kept as aliases: "
+              f"{list(shared.values())[:2]})")
+    print("  the ones this was all for:")
+    for old, new, _f in sorted(renames, key=lambda r: r[1]):
+        rd = redirects.get(new) or []
+        if rd:
+            print(f"    {new:34} <- {rd + [old]}")
+
+
 def main():
     ap = argparse.ArgumentParser(description="scrape dbd icons + metadata into a local library")
     ap.add_argument(
@@ -575,7 +1038,15 @@ def main():
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     ap.add_argument("--index", type=Path, default=DEFAULT_INDEX)
     ap.add_argument("--no-dedup", action="store_true", help="skip phash dedup during a scrape")
+    ap.add_argument(
+        "--dry-run", action="store_true",
+        help="resolve names/keys and report what would change, without downloading or writing"
+    )
     args = ap.parse_args()
+
+    if args.dry_run:
+        dry_run(args.categories, limit=args.limit)
+        return
 
     # one pass: download (or reuse cached) -> normalize+phash -> annotate rarity -> dedup -> write
     index, skipped = scrape(
@@ -593,6 +1064,9 @@ def main():
     role = Counter(row.get("role") for row in index)
     side = Counter(row.get("side") for row in index)
     described = sum(1 for row in index if row["desc"])
+    aliased = sum(1 for row in index if row.get("aliases"))
+    n_alias = sum(len(row.get("aliases") or []) for row in index)
+    print(f"aliases: {n_alias} over {aliased} rows (old names + wiki redirects; searched AND matched)")
     print(f"obtainable: {obt.get('normal', 0)} normal, {obt.get('event', 0)} event, "
           f"{obt.get('unavailable', 0)} unavailable   |   {described} with a description")
     print(f"role: {role.get('killer', 0)} killer, {role.get('survivor', 0)} survivor, "

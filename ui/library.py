@@ -20,7 +20,7 @@ import customtkinter as ctk
 from PIL import Image
 
 from src import detect
-from src.node import dedup_index_rows, normalize_name
+from src.node import dedup_index_rows, normalize_name, row_names
 
 from .theme import THUMB_PX
 
@@ -45,15 +45,27 @@ class Library:
     def _reindex(self):
         """name-key -> row, so a placed chip finds its thumbnail without scanning all 1600 rows.
         lookup_row used to be a linear scan folding every name with a regex, which cost ~1ms a call
-        and ran once per chip built."""
+        and ran once per chip built.
+        aliases are indexed too (in a second pass, so a canonical name always beats another row's
+        alias), which is what lets a config rule saved under an old name -- '10th Anniversary' before
+        the wiki article resolved it to 'Toothy Torte' -- still find its row."""
         self._by_key = {}
         for r in self.rows:
             self._by_key.setdefault(normalize_name(r.get("name", "")), r)
+        for r in self.rows:
+            for alias in r.get("aliases") or []:
+                self._by_key.setdefault(normalize_name(alias), r)
 
     def filter(self, query="", category="all", rarity="all", role="all", show_unavailable=False):
         """rows matching the search box + dropdowns. case/punctuation-insensitive name search
         (folded like the detector via node.normalize_name), category exact, rarity exact with a
         'none' bucket for null-rarity rows (perks/powers/visceral).
+
+        the search also looks through a row's aliases (the wiki's redirects to its article, plus the
+        name we used before that article was resolved), so the offering the game calls "Toothy Torte"
+        is found by that name as well as by the "10th Anniversary" its sprite file is named after, and
+        a perk renamed off its lost licence still answers to what people call it ("Decisive Strike",
+        "DS" -> Will to Live).
 
         role ('all'|'killer'|'survivor') filters by who plays the glyph, strictly: a pick shows only
         rows whose role/side is exactly that side. items (survivor), powers (killer), and perks (per
@@ -81,7 +93,7 @@ class Library:
                     continue
             elif rarity != "all" and r.get("rarity") != rarity:
                 continue
-            if q and q not in normalize_name(r.get("name", "")):
+            if q and not any(q in n for n in row_names(r)):
                 continue
             out.append(r)
         return out

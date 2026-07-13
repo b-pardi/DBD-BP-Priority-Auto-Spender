@@ -934,23 +934,38 @@ def fetch_page_titles(session):
         cont = data["continue"]
 
 
+# a disambiguated page ("Mirror Shards (Omnipresent Evil)") leads with a hatnote, not its description,
+# and _owner parses no owner out of that -> the row loses its side and the ui role filter hides it.
+_HATNOTE_RE = re.compile(r"(?i)\bclick here\b|^For the\b|^Not to be confused\b")
+
+
+def _lead_sentence(extract):
+    """the real one-line classifier, skipping a leading disambiguation hatnote."""
+    for sentence in re.findall(r"[^.]*\.", extract or ""):
+        s = sentence.strip()
+        if s and not _HATNOTE_RE.search(s):
+            return s
+    return (extract or "").strip()
+
+
 def fetch_descriptions(session, titles, progress=None):
     """{normalized_name: lead_sentence} for the given wiki page titles, via the TextExtracts api.
     the lead is the wiki's one-line classifier (e.g. 'Spring Clamp is an Uncommon Add-on for
-    Toolboxes.'), shown as a hover tooltip in the ui. the real effect text isn't reachable from the
-    api (it's lua-rendered into the page html), so the lead sentence is all we keep. batch in 20s:
-    exlimit caps at 20 for extracts, and a bigger batch silently returns empty for the overflow."""
+    Toolboxes.'), shown as a hover tooltip in the ui, and parsed for an add-on's owner (see _owner).
+    the real effect text isn't reachable from the api (it's lua-rendered into the page html), so the
+    lead sentence is all we keep. 3 sentences not 1, so _lead_sentence can skip a hatnote. batch in
+    20s: exlimit caps at 20 for extracts, and a bigger batch silently returns empty for the overflow."""
     out = {}
     nbatch = (len(titles) + 19) // 20
     for bi, i in enumerate(range(0, len(titles), 20)):
         batch = titles[i:i + 20]
         data = session.get(API, params={
             "action": "query", "format": "json", "prop": "extracts",
-            "explaintext": 1, "exintro": 1, "exsentences": 1, "exlimit": "20",
+            "explaintext": 1, "exintro": 1, "exsentences": 3, "exlimit": "20",
             "redirects": 1, "titles": "|".join(batch),
         }, timeout=30).json()
         for pg in data.get("query", {}).get("pages", {}).values():
-            ex = (pg.get("extract") or "").strip().replace("\n", " ")
+            ex = _lead_sentence((pg.get("extract") or "").strip().replace("\n", " "))
             if ex:
                 out[_norm(pg["title"])] = ex
         if progress:

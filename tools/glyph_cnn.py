@@ -189,10 +189,37 @@ def val_synth(rows, seed, res=INPUT_RES):
 def _confusion_neighbors(Tz, k=8):
     """top-k nearest classes per class by ncc-template cosine (Tz is the z-normed sprite bank from
     detect). builds hard-negative family batches so near-dup glyphs (medkits, toolboxes, reagents)
-    land in the same batch and become each other's negatives."""
+    land in the same batch and become each other's negatives.
+    fixed pixel-space families: only the warmup source now, see _embedding_neighbors."""
     S = Tz @ Tz.T                            # (n,n) cosine, cheap at n~1471
     np.fill_diagonal(S, -1.0)
     return np.argsort(-S, axis=1)[:, :k]     # (n,k) neighbor class indices
+
+
+@torch.no_grad()
+def _embedding_neighbors(model, A_u8, dev, k=8, skip=1, bs=512):
+    """top-k confusable classes per class in the MODEL's own embedding space, (n,k) like
+    _confusion_neighbors so it drops straight into _sample_classes.
+
+    the point: _confusion_neighbors mines pixel-space ncc, i.e. the confusions of the matcher we
+    REPLACED (55% real top1 vs the cnn's 83%), and it's computed once and frozen for the whole run.
+    so half the batches harden against the wrong adversary while the pairs the model actually gets
+    wrong may never share a batch. mining the live embedding instead closes the loop: negatives track
+    what the model confuses NOW, and move on as it fixes them. that's aimed squarely at the symptom
+    -- real top5 98.6% vs top1 83.1% means the answer is in the shortlist and only the ranking among
+    near neighbours is weak, which is exactly what hard negatives train (and what trips the ocr gate).
+
+    skip drops the nearest few (semi-hard): always feeding the single hardest negative destabilises
+    infonce. costs one forward pass over the sprite bank, ~ms, so refresh cadence is free.
+    """
+    model.eval()
+    embs = [F.normalize(model(_to_gpu(A_u8[i:i + bs], dev)), dim=1)
+            for i in range(0, len(A_u8), bs)]
+    S = torch.cat(embs) @ torch.cat(embs).t()          # (n,n) cosine
+    S.fill_diagonal_(-1.0)
+    nn = S.topk(k + skip, dim=1).indices[:, skip:]     # drop the `skip` nearest, keep the next k
+    model.train()
+    return nn.cpu().numpy()
 
 
 # ------------------------------------------------------------------------------- training
@@ -314,9 +341,14 @@ def train(args):
 
     best_top1, best_state, best_step = -1.0, None, -1
     bar = tqdm(range(args.steps), desc="train")
+    mining = args.p_family > 0 and not args.no_mine
     for step in bar:
         for g in opt.param_groups:
             g["lr"] = args.lr * lr_at(step)
+        # once the embedding is worth mining, re-source the hard negatives from it; the fixed ncc
+        # families only stand in for the warmup (a random-init embedding gives nonsense neighbours).
+        if mining and step >= args.mine_after and step % args.mine_every == 0:
+            nn_idx = _embedding_neighbors(model, A_u8, dev, args.fam_k, args.mine_skip)
         cls = _sample_classes(n, args.batch, nn_idx, args.p_family, rng)
         var = rng.integers(0, args.k, size=len(cls))
         q = _light_aug(_to_gpu(Q_u8[cls, var], dev), args.aug_bright, args.aug_noise)
@@ -483,6 +515,14 @@ if __name__ == "__main__":
     s_train.add_argument("--p-family", dest="p_family", type=float, default=0.5,
                          help="fraction of batches drawn from confusion-neighbor families (hard negatives)")
     s_train.add_argument("--fam-k", dest="fam_k", type=int, default=8, help="neighbors per seed in a family batch")
+    s_train.add_argument("--no-mine", dest="no_mine", action="store_true",
+                         help="keep the fixed ncc families; don't re-mine negatives from the embedding")
+    s_train.add_argument("--mine-after", dest="mine_after", type=int, default=1000,
+                         help="step to start mining hard negatives from the embedding (warmup before)")
+    s_train.add_argument("--mine-every", dest="mine_every", type=int, default=250,
+                         help="steps between hard-negative refreshes")
+    s_train.add_argument("--mine-skip", dest="mine_skip", type=int, default=1,
+                         help="drop the N nearest per class (semi-hard; 0 = use the hardest)")
     s_train.add_argument("--aux-weight", dest="aux_weight", type=float, default=0.3,
                          help="weight of the aux class head (0 disables it); discarded at export")
     s_train.add_argument("--aug-bright", dest="aug_bright", type=float, default=0.15)

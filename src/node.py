@@ -34,9 +34,17 @@ NCC_CONF_MIN = 0.45
 # (wornOutTools, skeletonKey) fall below it and route to ocr.
 CNN_CONF_MIN = 0.65
 PHASH_MAX_HAM = 10
-# runner-up MARGIN floors: kept for the followup but no longer gate `confident` (2026-06-29). against
-# big same-shape pools a correct top match often has a tiny margin, so gating on it routed good
-# matches to ocr for nothing; score alone gates now, margin stays logged (see runner_up) as a lever.
+# cnn margin RESCUE. gating ON the margin was dropped 2026-06-29 because it rejected correct
+# near-ties; it earns its keep the other way round. real top5 is 98.6% vs top1 83.1%, i.e. the model's
+# misses ARE near-ties, so a decisive runner-up gap is strong evidence even at a middling cosine.
+# purely additive: it can only pull nodes OFF the ocr path, never onto it.
+# the cap is because detect scores pool-excluded rows -2.0, so a pool narrowed to ONE candidate
+# reports a nonsense margin (score + 2.0) with no real runner-up behind it; real margins sit far below.
+# NOT CALIBRATED -- re-sweep against the real labels (eval_matchers cnneval) after the retrain.
+CNN_RESCUE_MIN = 0.55
+CNN_RESCUE_MARGIN = 0.15
+CNN_MARGIN_CAP = 1.0
+# ncc/phash margin floors: logged only, never gated (see runner_up).
 NCC_MARGIN_MIN = 0.03
 PHASH_MARGIN_MIN = 2
 
@@ -232,17 +240,23 @@ class Node:
         return SHAPE_CATEGORIES.get(self.socket_shape, ())
 
     @property
+    def cnn_rescued(self):
+        """a mid-score cnn match its runner-up gap vouches for (see CNN_RESCUE_MIN)."""
+        return (self.matcher == 'cnn' and self.score >= CNN_RESCUE_MIN
+                and CNN_RESCUE_MARGIN <= self.margin <= CNN_MARGIN_CAP)
+
+    @property
     def confident(self):
         """is the icon match strong enough to trust on its own?
         direction depends on the matcher (ncc higher=better, phash lower=better).
-        score-only gate: the runner-up margin was dropped (see NCC_MARGIN_MIN) since it sent most
-        correct-but-near-tie matches to ocr; margin stays logged as a followup signal."""
+        cnn takes a 2-d gate: a high score, OR a mid score whose runner-up is far behind
+        (see cnn_rescued). ncc/phash stay score-only."""
         if self.match is None:
             return False
         if self.matcher == 'phash':
             return self.score <= PHASH_MAX_HAM
         if self.matcher == 'cnn':
-            return self.score >= CNN_CONF_MIN
+            return self.score >= CNN_CONF_MIN or self.cnn_rescued
         return self.score >= NCC_CONF_MIN  # ncc / ncc_masked
 
     @property
@@ -280,7 +294,9 @@ class Node:
                 reasons.append(f"weak match (dist {self.score:.0f}>{PHASH_MAX_HAM})")
             else:  # ncc / ncc_masked / cnn, higher cosine = better
                 floor = CNN_CONF_MIN if self.matcher == 'cnn' else NCC_CONF_MIN
-                reasons.append(f"weak match (score {self.score:.2f}<{floor})")
+                # log the margin too, so a debug line says whether the rescue was even in play
+                gap = f", margin {self.margin:.2f}" if self.matcher == 'cnn' else ""
+                reasons.append(f"weak match (score {self.score:.2f}<{floor}{gap})")
         if self.match is not None:  # disagreement only means something against an actual match
             if not self.category_agrees:
                 reasons.append(f"category {self.matched_category!r} not valid for {self.socket_shape}")

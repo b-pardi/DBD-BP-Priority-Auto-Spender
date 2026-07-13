@@ -934,18 +934,25 @@ def fetch_page_titles(session):
         cont = data["continue"]
 
 
-# a disambiguated page ("Mirror Shards (Omnipresent Evil)") leads with a hatnote, not its description,
-# and _owner parses no owner out of that -> the row loses its side and the ui role filter hides it.
-_HATNOTE_RE = re.compile(r"(?i)\bclick here\b|^For the\b|^Not to be confused\b")
+# a disambiguated page ("Mirror Shards (Omnipresent Evil)") leads with a hatnote instead of its
+# description, and _owner parses no owner out of that -> no side, and the ui role filter hides the row.
+_HATNOTE_RE = re.compile(r"(?i)^\s*(?:For the\b|Not to be confused\b).*?\bclick here\.\s*")
 
 
-def _lead_sentence(extract):
-    """the real one-line classifier, skipping a leading disambiguation hatnote."""
-    for sentence in re.findall(r"[^.]*\.", extract or ""):
-        s = sentence.strip()
-        if s and not _HATNOTE_RE.search(s):
-            return s
-    return (extract or "").strip()
+def _extracts(session, titles, sentences):
+    """{normalized title: intro extract} from TextExtracts. batch of <=20 (exlimit's cap; a bigger
+    one silently returns empty for the overflow)."""
+    data = session.get(API, params={
+        "action": "query", "format": "json", "prop": "extracts",
+        "explaintext": 1, "exintro": 1, "exsentences": sentences, "exlimit": "20",
+        "redirects": 1, "titles": "|".join(titles),
+    }, timeout=30).json()
+    out = {}
+    for pg in data.get("query", {}).get("pages", {}).values():
+        ex = (pg.get("extract") or "").strip().replace("\n", " ")
+        if ex:
+            out[_norm(pg["title"])] = ex
+    return out
 
 
 def fetch_descriptions(session, titles, progress=None):
@@ -953,23 +960,21 @@ def fetch_descriptions(session, titles, progress=None):
     the lead is the wiki's one-line classifier (e.g. 'Spring Clamp is an Uncommon Add-on for
     Toolboxes.'), shown as a hover tooltip in the ui, and parsed for an add-on's owner (see _owner).
     the real effect text isn't reachable from the api (it's lua-rendered into the page html), so the
-    lead sentence is all we keep. 3 sentences not 1, so _lead_sentence can skip a hatnote. batch in
-    20s: exlimit caps at 20 for extracts, and a bigger batch silently returns empty for the overflow."""
+    lead sentence is all we keep.
+    exsentences=1 leaves the sentence split to the wiki on purpose: splitting on '.' ourselves eats
+    'S.T.A.R.S. Badge' and 'Rules Set No.2' at the wrong period, which loses their owner. a
+    disambiguated page's one sentence is its hatnote, so re-ask just those for more and strip it."""
     out = {}
     nbatch = (len(titles) + 19) // 20
     for bi, i in enumerate(range(0, len(titles), 20)):
-        batch = titles[i:i + 20]
-        data = session.get(API, params={
-            "action": "query", "format": "json", "prop": "extracts",
-            "explaintext": 1, "exintro": 1, "exsentences": 3, "exlimit": "20",
-            "redirects": 1, "titles": "|".join(batch),
-        }, timeout=30).json()
-        for pg in data.get("query", {}).get("pages", {}).values():
-            ex = _lead_sentence((pg.get("extract") or "").strip().replace("\n", " "))
-            if ex:
-                out[_norm(pg["title"])] = ex
+        out.update(_extracts(session, titles[i:i + 20], 1))
         if progress:
             progress("fetching descriptions", bi + 1, nbatch)
+
+    hatnoted = [t for t in titles if _HATNOTE_RE.match(out.get(_norm(t), ""))]
+    for i in range(0, len(hatnoted), 20):
+        for key, ex in _extracts(session, hatnoted[i:i + 20], 3).items():
+            out[key] = _HATNOTE_RE.sub("", ex, count=1).strip() or out[key]
     return out
 
 

@@ -142,6 +142,21 @@ class SettingsScreen(ctk.CTkFrame):
                       variable=self.skip_weak_var).grid(row=2, column=0, sticky="w", pady=4)
         self._on_pool_exclusive()   # reflect the loaded config's lock state
 
+        # --- spend order ---
+        # entity race: the spender already skips nodes that are bought or entity-eaten (read off each
+        # node's socket ring). this goes further and reorders ties toward whatever the entity is next
+        # to. it alters which node an equal-priority tie picks, so it stays opt-in.
+        g = self._group("Spend order", "how the spender breaks ties between equally-ranked nodes")
+        self.entity_race_var = ctk.BooleanVar(value=bool(cfg.get("entity_race", False)))
+        ctk.CTkSwitch(g, text="Race the entity (buy the most at-risk node first)",
+                      variable=self.entity_race_var).grid(row=0, column=0, sticky="w", pady=4)
+        ctk.CTkLabel(
+            g, font=theme.FONT_SMALL, text_color="gray", anchor="w", justify="left",
+            text=("Alters your priorities: when several nodes tie within a tier, the one nearest the\n"
+                  "entity wins instead of a random pick, since anything it eats is gone for good.\n"
+                  "Never crosses tiers, and does nothing until the entity actually appears."),
+        ).grid(row=1, column=0, sticky="w", pady=(0, 4))
+
         # --- timing ---
         g = self._group("Timing (seconds)",
                         "raise these if a live run buys too early or logs failed OCR reads")
@@ -289,6 +304,7 @@ class SettingsScreen(ctk.CTkFrame):
         cfg["pool_inferred"] = bool(self.pool_inferred_var.get()) or cfg["pool_exclusive"]
         # switch is worded as the skip behavior, so it's the inverse of the fallback flag
         cfg["weak_match_fallback"] = not bool(self.skip_weak_var.get())
+        cfg["entity_race"] = bool(self.entity_race_var.get())
         cfg["auto_prestige"] = bool(self.auto_prestige_var.get())
         for key, entry, label in (("settle_s", self.settle, "settle wait"),
                                   ("ocr_hover_s", self.hover, "OCR tooltip wait"),

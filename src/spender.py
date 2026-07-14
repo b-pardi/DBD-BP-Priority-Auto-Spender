@@ -18,6 +18,7 @@ import argparse
 import threading
 import time
 import json
+import math
 import random
 import sys
 import ctypes
@@ -239,6 +240,10 @@ def load_config(path=None):
     # of inferred, so the ui keeps inferred forced on whenever exclusive is set.
     cfg.setdefault("pool_inferred", True)
     cfg.setdefault("pool_exclusive", False)
+    # entity race: break within-tier ties toward the nodes the entity is about to eat (see _break_tie).
+    # off by default because it CHANGES which node an equal-priority tie picks, and that's the user's
+    # call, not ours.
+    cfg.setdefault("entity_race", False)
     # ui-only display prefs (the engine ignores them); kept here so the single serializer round-trips
     # them and they default sanely on an older file. see ui.widgets.tooltip + ui.library.filter.
     cfg.setdefault("show_tooltips", True)
@@ -342,6 +347,8 @@ def live_source(
         for d in dets:
             d["x"] += x0
             d["y"] += y0                         # crop-local -> full-frame, so clicks + ocr line up
+            if d.get("slot_xy"):                 # a frame coord too, so a state re-read lands on the node
+                d["slot_xy"] = (d["slot_xy"][0] + x0, d["slot_xy"][1] + y0)
         if masks:
             # a blanked mask rect binarizes into a solid blob that becomes a fake circle;
             # drop any detection whose center landed in a masked ui region (perk row / spend button).
@@ -367,6 +374,8 @@ def _log_scan_summary(nodes):
     ocr so much' that the per-node [ocr] lines then itemize."""
     real = [n for n in nodes if not n.is_center]
     ncenter = len(nodes) - len(real)
+    taken = [n for n in real if n.taken]           # already bought or entity-eaten: never a target
+    real = [n for n in real if not n.taken]
     pooled = [n for n in real if n.pooled_out]     # outside the priority pool: unknown, skipped
     scored = [n for n in real if not n.pooled_out]
     need = [n for n in scored if n.needs_resolution]
@@ -378,6 +387,9 @@ def _log_scan_summary(nodes):
     summary = ", ".join(f"{k} x{v}" for k, v in
                         sorted(tally.items(), key=lambda kv: -kv[1])) or "none"
     pooled_str = f", {len(pooled)} pooled-out" if pooled else ""
+    if taken:
+        bought = sum(1 for n in taken if n.state == detect.STATE_BOUGHT)
+        pooled_str += f", {bought} bought + {len(taken) - bought} entity-eaten (skipped)"
     print(f"[scan] {len(real)} nodes (+{ncenter} center): "
           f"{len(scored) - len(need)} trusted, {len(need)} -> ocr{pooled_str} | reasons: {summary}")
 
@@ -417,17 +429,61 @@ def resolve_uncertain(nodes, frame, region, rows, debug=False, hover_delay_s=Non
     return nodes
 
 
+def _break_tie(hits, nodes, entity_race):
+    """pick one of several equally-ranked nodes.
+    default is random (inner/cheaper nodes tend to be lower quality, so no order is imposed).
+    entity_race instead takes the node NEAREST the entity, because everything it has eaten is gone for
+    good and it keeps eating outward from there, so the nodes beside it are the ones we're about to
+    lose. it only kicks in once the entity has actually shown up (the first buys of a web are always
+    entity-free), and it never crosses a tier: this reorders WITHIN a tier, it doesn't outrank one.
+    ties within a node radius go back to random so two equally-exposed nodes aren't ordered by
+    subpixel noise."""
+    if not entity_race:
+        return random.choice(hits)
+    eaten = [n for n in nodes if n.state == detect.STATE_ENTITY]
+    if not eaten:
+        return random.choice(hits)   # entity hasn't appeared yet, nothing to race
+    dists = [min(math.hypot(h.x - e.x, h.y - e.y) for e in eaten) for h in hits]
+    nearest = min(dists)
+    exposed = [h for h, d in zip(hits, dists) if d <= nearest + h.r]
+    return random.choice(exposed)
+
+
+def refresh_states(nodes, frame):
+    """re-read every node's live state off a fresh frame, in place. returns the counts that CHANGED.
+
+    the whole point of the once-per-level scan is that node positions don't move within a level, and
+    that cuts both ways: it also means a state re-read needs no re-detect. no find_circles, no glyph
+    extraction, no matcher, no ocr hover, just a color read of each socket ring at coords we already
+    have. cheap enough to run after every buy, which is what makes it worth having: dbd auto-buys the
+    whole cheapest path to whatever we click, and the entity eats nodes mid-web, and a stale snapshot
+    sees neither (measured: 8 of 22 targets on one spent fixture were already dead).
+
+    a node with no lattice geometry (no fit that scan) can't be re-read and stays available."""
+    # the center is skipped, not just spared the work: its own red entity glow reads as 'bought'.
+    live = [n for n in nodes if not n.is_center and n.ring_r and n.slot_xy]
+    states = detect.read_node_states(
+        frame, [(n.slot_xy[0], n.slot_xy[1], n.ring_r) for n in live])
+    delta = {}
+    for n, state in zip(live, states):
+        if state != n.state:
+            delta[state] = delta.get(state, 0) + 1
+            n.state = state
+    return delta
+
+
 def choose_next(nodes, config):
     """return the highest-priority Node to buy, or None for center auto-spend.
     walks the tiers high to low and stops at the first tier with any matching node:
-      normal tier   pick at random across every node matching any rule in the tier (the default,
-                    inner/cheaper nodes tend to be lower quality so no order is imposed).
+      normal tier   every node matching any rule in the tier is a hit.
       ordered tier  prefer nodes matching the earliest (topmost) rule, i.e. the first rule with any
-                    match wins, breaking ties at random within that one rule (within-tier ordering).
-    returns one node, the loop rescans after each buy; the don't-repick guard lives in the loop so
-    this stays effectively a pure function of the node list. it does tag the chosen node with its
-    pick provenance (pick_tier / pick_rank / pick_ordered) so the loop can log why it won.
+                    match wins (within-tier ordering).
+    either way the winner among equally-ranked hits comes from _break_tie (random, or entity-race).
+    taken nodes never match (Node.matches gates on state), so a bought or eaten node can't be picked.
+    returns one node; it tags the choice with its pick provenance (pick_tier / pick_rank /
+    pick_ordered) so the loop can log why it won.
     """
+    entity_race = bool(config.get("entity_race", False))
     for ti, tier in enumerate(config.get("priorities", [])):
         rules = tier_rules(tier)
         hits = [n for n in nodes if any(n.matches(rule) for rule in rules)]
@@ -437,10 +493,10 @@ def choose_next(nodes, config):
             for rank, rule in enumerate(rules, start=1):
                 rule_hits = [n for n in hits if n.matches(rule)]
                 if rule_hits:
-                    choice = random.choice(rule_hits)
+                    choice = _break_tie(rule_hits, nodes, entity_race)
                     choice.pick_tier, choice.pick_rank, choice.pick_ordered = ti + 1, rank, True
                     return choice
-        choice = random.choice(hits)
+        choice = _break_tie(hits, nodes, entity_race)
         choice.pick_tier, choice.pick_rank, choice.pick_ordered = ti + 1, None, False
         return choice
     return None
@@ -463,10 +519,11 @@ def _node_cost(node, cost_table):
 
 
 def estimate_web_cost(nodes, cost_table=RARITY_BP_COST):
-    """rough total bloodpoint cost to fill the remaining web, summed over every non-center node
-    (the center auto-spend buys them all). pooled-out nodes still cost bp, so they count too. used by
-    the bp-floor stop to tell an affordable level from the final partial one."""
-    return sum(_node_cost(n, cost_table) for n in nodes if not n.is_center)
+    """rough total bloodpoint cost to fill the REMAINING web, summed over every node the center
+    auto-spend would still have to buy. pooled-out nodes still cost bp, so they count; taken ones
+    don't, since a bought node is already paid for and an entity-eaten one can't be bought at all.
+    used by the bp-floor stop to tell an affordable level from the final partial one."""
+    return sum(_node_cost(n, cost_table) for n in nodes if not n.is_center and not n.taken)
 
 
 def _reached_level_goal(prestige, level, stop_prestige, stop_level):
@@ -804,6 +861,21 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
             if consume:
                 consume(choice)                  # sim drops it from the web; live no-op
             _interruptible_sleep(switch, settle_s)  # let the buy animation play before the next
+
+            # that click bought more than the one node we aimed at (dbd auto-buys the whole cheapest
+            # path to it) and the entity may have eaten a few more, so re-read the web before the next
+            # pick rather than trusting a snapshot that is now several buys out of date. cheap: no
+            # re-detect, just a color read at coords we already have (see refresh_states).
+            # AFTER the settle wait, not before: mid-animation the ring is only half drawn.
+            if not dry_run and frame is not None and not switch.killed:
+                frame, region = capture.grab_with_region(region)
+                delta = refresh_states(nodes, frame)
+                if delta and debug:
+                    # the burst size is the interesting bit: the entity takes 1 node some buys and 6
+                    # or 7 others, so log it to build a picture of what the risk actually looks like.
+                    print("[state] " + ", ".join(f"+{v} {k}" for k, v in sorted(delta.items())))
+                    if frame_sink is not None:   # repaint so the debug view shows what just died
+                        frame_sink(detect.draw_detections(frame, nodes))
 
         if switch.killed:                 # killed: bail before the auto-spend
             break

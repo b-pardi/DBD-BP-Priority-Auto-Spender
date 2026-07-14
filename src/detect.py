@@ -727,7 +727,7 @@ def update_ring_template(gray, grad, tpl_pts, scale):
 def recover_missed_slots(gray, grad, empty_slots, scale, debug=False):
     """matched-filter presence test on the slots the contour pass left empty.
     scores each slot with z-normed ncc of the mean-node template on gray + gradient crops (mean of the two, +-PRESENCE_SEARCH window); on the validation scans every real miss scored >=0.39 and every empty slot <=0.27.
-    returns [(x, y, score)] at the ncc peak, empty until the template has seen PRESENCE_MIN_N nodes."""
+    empty_slots is [(slot_idx, x, y)]; returns [(slot_idx, x, y, score)] at the ncc peak, empty until the template has seen PRESENCE_MIN_N nodes."""
     tpl = _get_ring_tpl()
     if tpl[2] < PRESENCE_MIN_N:
         if debug:
@@ -739,7 +739,7 @@ def recover_missed_slots(gray, grad, empty_slots, scale, debug=False):
     te = cv2.resize((tpl[1] / tpl[2]).astype(np.float32), (2 * half, 2 * half))
     h_img, w_img = gray.shape[:2]
     found = []
-    for sx, sy in empty_slots:
+    for slot_i, sx, sy in empty_slots:
         # web bbox crop can run right up to the outer ring,
         # so shrink the search window to whatever margin the frame leaves rather than skip the edge slot (peak is within a few px anyway); below zero even the template doesn't fit
         sxi, syi = int(round(sx)), int(round(sy))
@@ -756,8 +756,91 @@ def recover_missed_slots(gray, grad, empty_slots, scale, debug=False):
         iy, ix = np.unravel_index(int(np.argmax(comb)), comb.shape)
         score = float(comb[iy, ix])
         if score >= PRESENCE_THRESH:
-            found.append((sxi - s_here + int(ix), syi - s_here + int(iy), score))
+            found.append((slot_i, sxi - s_here + int(ix), syi - s_here + int(iy), score))
     return found
+
+
+# ---------------------------------------------------------------------------
+# node state: is this node still buyable, or has it already been taken?
+# dbd auto-buys the cheapest PATH to whatever you click and the entity eats nodes mid-web, so a
+# once-per-level snapshot goes stale and the spender re-clicks dead nodes (measured: 8 of 22 targets
+# on tests/fixtures/web-130708).
+#
+# the signal is in the socket RING, not the glyph: a taken node keeps its plate and its icon (which
+# is why the matcher happily re-identifies it), and normalize_glyph throws the ring away before the
+# matcher ever sees it. so this is a color read, and it cannot be a glyph-model read.
+#   bought  a BRIGHT red ring hugging the plate  (measured on the 0.74-0.90r band)
+#   entity  the ring blacked out under a dark maroon halo (on the 0.90-1.12r band)
+# both bands are needed: bought's red is strongest inside the ring, while entity blacks out the ring
+# itself, and the band OUTSIDE the ring is map art (a dim node on a dark floor false-reads entity).
+# ---------------------------------------------------------------------------
+
+STATE_AVAILABLE = "available"
+STATE_BOUGHT = "bought"
+STATE_ENTITY = "entity"
+
+# thresholds sit midway between the classes, measured over 3 spent webs / 90 hand-labeled slots:
+#   hot    bought >= 0.45   others <= 0.09
+#   gore   entity >= 0.20   others <= 0.15
+#   black  entity >= 0.53   others <= 0.34
+# entity needs gore AND black, so a false positive has to beat both (none of the 83 non-entity slots does).
+BOUGHT_HOT_MIN = 0.22
+ENTITY_GORE_MIN = 0.17
+ENTITY_BLACK_MIN = 0.44
+
+# bgr, draw_detections only: taken nodes should be obvious at a glance in the debug view
+STATE_COLORS = {
+    STATE_AVAILABLE: (0, 255, 0),      # green
+    STATE_BOUGHT: (0, 0, 255),         # red
+    STATE_ENTITY: (255, 0, 255),       # magenta
+}
+
+
+def _annulus_px(hsv, x, y, r, lo, hi, min_px=20):
+    """hsv pixels in the annulus [lo*r, hi*r] around (x, y), or None if too few (node at a frame edge).
+    crops a local box before masking so a state read is O(r^2) not O(frame): this runs on every node
+    after every buy, unlike sample_disk_hsv which only runs once per scan."""
+    x, y = int(round(x)), int(round(y))
+    R = int(np.ceil(hi * r)) + 1
+    h, w = hsv.shape[:2]
+    x0, x1 = max(x - R, 0), min(x + R + 1, w)
+    y0, y1 = max(y - R, 0), min(y + R + 1, h)
+    if x1 - x0 < 2 or y1 - y0 < 2:
+        return None
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    d2 = (xx - x) ** 2 + (yy - y) ** 2
+    px = hsv[y0:y1, x0:x1][(d2 >= (lo * r) ** 2) & (d2 <= (hi * r) ** 2)]
+    return px if len(px) >= min_px else None
+
+
+def read_node_state(hsv, x, y, r):
+    """'available' | 'bought' | 'entity' for one node, read off its socket ring (see the block above).
+    r is the LATTICE socket radius (Resolution.NODE_RADIUS * scale), not isolate's r_ref: a taken
+    node's disk color is meaningless so its r_ref can't be trusted (and isolate often fails outright).
+    an unreadable ring returns 'available', i.e. the pre-state behavior of treating every node as buyable."""
+    inner = _annulus_px(hsv, x, y, r, 0.74, 0.90)
+    ring = _annulus_px(hsv, x, y, r, 0.90, 1.12)
+    if inner is None or ring is None:
+        return STATE_AVAILABLE
+
+    h, s, v = inner[:, 0].astype(int), inner[:, 1].astype(int), inner[:, 2].astype(int)
+    seam = np.minimum(h, 180 - h) <= 8   # red hue, wrap-safe; tight enough that ultra-rare's pink (h=171) stays out
+    if float((seam & (s >= 110) & (v >= 80)).mean()) >= BOUGHT_HOT_MIN:
+        return STATE_BOUGHT
+
+    h, s, v = ring[:, 0].astype(int), ring[:, 1].astype(int), ring[:, 2].astype(int)
+    gore = float(((np.minimum(h, 180 - h) <= 8) & (s >= 60) & (v < 80)).mean())   # dark maroon halo
+    black = float((v <= 42).mean())                                                # blacked-out ring
+    if gore >= ENTITY_GORE_MIN and black >= ENTITY_BLACK_MIN:
+        return STATE_ENTITY
+    return STATE_AVAILABLE
+
+
+def read_node_states(frame, xyr):
+    """read_node_state for a whole web off one bgr frame: xyr is [(x, y, ring_r)], returns [state].
+    one frame convert for the lot, so the per-node cost is just its ring read (see spender.refresh_states)."""
+    hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    return [read_node_state(hsv, x, y, r) for x, y, r in xyr]
 
 
 def sample_disk_hsv(hsv, x, y, r, s_floor=30, v_floor=20, min_px=6):
@@ -786,6 +869,7 @@ def find_nodes_in_frame(
         use_hough=False, resolution=None, center=None, use_lattice=True
     ):
     """find all circles in the blood web and clean them up to identify clickable nodes.
+    returns [(x, y, r, rarity, slot, state, ring_r)]: slot/ring_r are the lattice index and socket radius (None without a lattice fit), state is read_node_state's available|bought|entity.
     thresh_method picks find_circles' binarization (adaptive_gaussian|otsu|canny), use_hough swaps the localizer between the contour pass (default) and HoughCircles, both threaded from detect() so the settings ui can tune them.
     resolution (a Resolution, default Resolution.from_frame(frame)) scales rmin/rmax to this frame's size.
     use_lattice snaps circles onto the fixed slot grid (dropping off-slot junk) and runs the presence test on empty slots to recover contour misses.
@@ -795,19 +879,24 @@ def find_nodes_in_frame(
         frame, thresh_method=thresh_method, use_hough=use_hough,
         debug=False, resolution=resolution
     ) # list of (x, y, r)
+    circles = [(x, y, r, None) for x, y, r in circles]   # (x, y, r, slot); slot filled in by the lattice snap
+    ring_r = None   # lattice socket radius, the geometry read_node_state's annuli are fractions of
 
     if use_lattice and circles:
         if center is None:
             center = find_center_node(frame)
         resolution = resolution or Resolution.from_frame(frame)
-        fit = fit_lattice(circles, center=center, scale_hint=resolution.scale)
+        fit = fit_lattice([(x, y, r) for x, y, r, _ in circles], center=center,
+                          scale_hint=resolution.scale)
         if fit is None:
             if debug:
                 print(f"[lattice] fit skipped ({len(circles)} circles, "
                       f"center {'found' if center else 'missing'}), keeping raw detections")
         else:
             cx, cy, s = fit
-            snapped, taken, dropped, tpl_pts = snap_to_lattice(circles, cx, cy, s)
+            ring_r = Resolution.NODE_RADIUS * s
+            snapped, taken, dropped, tpl_pts = snap_to_lattice(
+                [(x, y, r) for x, y, r, _ in circles], cx, cy, s)
             if debug:
                 print(f"[lattice] center=({cx:.0f},{cy:.0f}) scale={s:.3f}: "
                       f"{len(snapped)} snapped, {len(dropped)} junk dropped")
@@ -816,24 +905,29 @@ def find_nodes_in_frame(
             gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY).astype(np.float32)
             grad = _grad_mag(gray)
             update_ring_template(gray, grad, tpl_pts, s)
-            circles = [(x, y, r) for x, y, r, _ in snapped]
+            circles = [(x, y, r, i) for x, y, r, i in snapped]
             if len(snapped) >= 3:   # a bogus fit snaps almost nothing, don't recover off one
                 slots, _ = lattice_slots(cx, cy, s)
-                empty = [tuple(p) for i, p in enumerate(slots) if i not in taken]
-                for x, y, score in recover_missed_slots(gray, grad, empty, s, debug=debug):
+                empty = [(i, p[0], p[1]) for i, p in enumerate(slots) if i not in taken]
+                for i, x, y, score in recover_missed_slots(gray, grad, empty, s, debug=debug):
                     if debug:
                         print(f"[lattice] recovered miss at ({x},{y}) presence={score:.2f}")
-                    circles.append((x, y, Resolution.NODE_RADIUS * s))
+                    circles.append((x, y, ring_r, i))
 
     nodes = []
-    for x, y, r in circles:
+    for x, y, r, slot in circles:
+        # state first: a taken node's disk color is meaningless, so its rarity read (and isolate, and
+        # the matcher) are all garbage. keep it anyway, unrarity'd, so the loop knows the slot is dead
+        # and the entity-race tiebreak can measure distance to it.
+        state = read_node_state(hsv, x, y, ring_r) if ring_r else STATE_AVAILABLE
         disk_hsv = sample_disk_hsv(hsv, x, y, r)
         rarity, dist = classify_rarity(disk_hsv)
-        if rarity is None:
-            continue # remove circle from list if a rarity wasn't obtained
-        if max_anchor_dist is not None and dist > max_anchor_dist:
-            continue                               # not near any rarity -> probably not a node
-        nodes.append((int(x), int(y), int(r), rarity))
+        if state == STATE_AVAILABLE:
+            if rarity is None:
+                continue # remove circle from list if a rarity wasn't obtained
+            if max_anchor_dist is not None and dist > max_anchor_dist:
+                continue                           # not near any rarity -> probably not a node
+        nodes.append((int(x), int(y), int(r), rarity, slot, state, ring_r))
 
     if debug:
         _show(draw_detections(frame, nodes), "find_nodes")
@@ -1056,8 +1150,27 @@ def detect(
 
     for node in nodes:
         x, y, r, rarity = int(node[0]), int(node[1]), int(node[2]), node[3]
+        slot, state, ring_r = node[4], node[5], node[6]
         if center is not None and (x - center[0]) ** 2 + (y - center[1]) ** 2 <= center[2] ** 2:
             continue # this circle is the center node, already emitted above
+
+        # (x, y) is still the lattice slot center here, which is what read_node_state's annuli were
+        # calibrated on, and unlike the plate centroid isolate is about to compute it doesn't move when
+        # a node's look changes. keep it: a state RE-read (spender.refresh_states) must sample the same
+        # spot, and off the centroid the entity ring read lands a few px out and misses (slots 18/29).
+        slot_xy = (x, y)
+
+        # already bought (by us, or by dbd auto-pathing through it) or eaten by the entity: it can
+        # never be a buy target, so skip isolate + the matcher + the ocr hover it would have routed to.
+        if state != STATE_AVAILABLE:
+            res.append({
+                'x': x, 'y': y, 'r': int(ring_r or r), 'rar': rarity, 'cat': None,
+                'slot': slot, 'state': state, 'ring_r': ring_r, 'slot_xy': slot_xy,
+                'glyph_bgr': None,
+                'match': None, 'score': 0.0, 'margin': 0.0, 'matcher': matcher, 'runner_up': None,
+            })
+            continue
+
         iso = isolate_node_contents(frame, x, y, r, rarity, r_tol=r_tol)
         if iso is None:
             if debug: print("WARNING: detect() - Node skipped after failing to isolate node contents")
@@ -1080,6 +1193,7 @@ def detect(
                 if debug: print(f"pooled out {socket_shape} node @ {cx},{cy}")
                 res.append({
                     'x': cx, 'y': cy, 'r': r_ref, 'rar': rarity, 'cat': socket_shape,
+                    'slot': slot, 'state': state, 'ring_r': ring_r, 'slot_xy': slot_xy,
                     'glyph_bgr': glyph, 'pooled_out': True,
                     'match': None, 'score': 0.0, 'margin': 0.0, 'matcher': matcher, 'runner_up': None,
                 })
@@ -1104,6 +1218,7 @@ def detect(
             'x': cx, 'y': cy, 'r': r_ref,
             'rar': rarity,
             'cat': socket_shape,
+            'slot': slot, 'state': state, 'ring_r': ring_r, 'slot_xy': slot_xy,
             'glyph_bgr': glyph,
             'match': best_match_row, 'score': score, 'margin': margin, 'matcher': matcher,
             'runner_up': runner.get('name') or runner.get('key'),  # 2nd-best, debug-only
@@ -1130,23 +1245,31 @@ def draw_detections(frame, nodes):
     keys come straight off detect()'s output (rar, cat, score, matcher, match row)."""
     out = frame.copy()
     for n in nodes:
+        state = STATE_AVAILABLE
         if isinstance(n, dict):
             x, y, r = n["x"], n["y"], n["r"]
+            state = n.get("state", STATE_AVAILABLE)
             if n.get("kind") == "center":
                 lines = ["autospend"]
+            elif state != STATE_AVAILABLE:
+                lines = [state]                  # taken: never identified, so there's no name to show
             else:
                 match = n.get("match") or {} # match is a library row dict (or None)
                 name = match.get("name") or match.get("key") or "?"
                 # name on its own line so long icon names stay legible over the busy web
                 lines = [f"{n.get('rar', '?')}/{n.get('cat', '?')} {_score_str(n)}", name]
         elif isinstance(n, tuple):
-            x, y, r, rarity = n
-            lines = [str(rarity)]
+            x, y, r, rarity = n[:4]              # find_nodes_in_frame tuples carry slot/state/ring_r too
+            state = n[5] if len(n) > 5 else STATE_AVAILABLE
+            lines = [str(rarity) if state == STATE_AVAILABLE else state]
         else:
             # spender.Node: the boundary object the live loop resolves nodes into, post-ocr
             x, y, r = n.x, n.y, n.r
+            state = n.state
             if n.is_center:
                 lines = ["autospend"]
+            elif n.taken:
+                lines = [n.state]                # taken: never identified, so there's no name to show
             else:
                 # matched_name/score are the matcher's own read, frozen before ocr can overwrite
                 # node.name; ocr read is only shown when it actually settled the node (resolved_by).
@@ -1156,13 +1279,14 @@ def draw_detections(frame, nodes):
                     f"{n.matcher}: {n.matched_name or '?'} {n.score:.2f}",
                     f"ocr: {ocr_read}",
                 ]
-        cv2.circle(out, (x, y), r, (0, 255, 0), 2)
+        col = STATE_COLORS.get(state, (0, 255, 0))   # taken nodes stand out at a glance in the debug view
+        cv2.circle(out, (x, y), r, col, 2)
         # stack the lines just above the circle, last line nearest the rim
         for i, line in enumerate(lines):
             org = (x - r, y - r - 6 - (len(lines) - 1 - i) * 14)
-            # black underlay then green so the label stays readable over the busy web background
+            # black underlay then the state color so the label stays readable over the busy web background
             cv2.putText(out, line, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
-            cv2.putText(out, line, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 1, cv2.LINE_AA)
+            cv2.putText(out, line, org, cv2.FONT_HERSHEY_SIMPLEX, 0.5, col, 1, cv2.LINE_AA)
     return out
 
 

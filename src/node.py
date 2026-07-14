@@ -179,6 +179,16 @@ class Node:
     is_center: bool = False # center auto-spend node, found by red glow; never a buy target
     pooled_out: bool = False # outside the priority match pool: read as unknown, never ocr'd or bought
 
+    # live node state off the socket ring (detect.read_node_state), refreshed after every buy since
+    # dbd auto-buys the whole path to whatever we click and the entity eats nodes mid-web.
+    state: str = 'available'   # 'available' | 'bought' | 'entity'
+    slot: int = None           # lattice slot index (None without a lattice fit)
+    # the geometry a state re-read samples: the LATTICE slot center + socket radius, not (x, y, r).
+    # x/y is isolate's plate centroid, a better click target but it shifts with the plate, and off it
+    # the ring read lands a few px out and misses a marginal entity node. None without a lattice fit.
+    slot_xy: tuple = None
+    ring_r: float = None
+
     # matched-icon reads, from the library row the matcher picked.
     name: str = None       # matched icon display name
     match: dict = None     # raw library row {key,name,category,rarity,...} or None
@@ -213,6 +223,10 @@ class Node:
             socket_shape=d['cat'],
             is_center=(d.get('kind') == 'center'),
             pooled_out=bool(d.get('pooled_out', False)),
+            state=d.get('state', 'available'),
+            slot=d.get('slot'),
+            slot_xy=d.get('slot_xy'),
+            ring_r=d.get('ring_r'),
             name=(m.get('name') if m else None),
             match=m,
             matched_name=(m.get('name') if m else None),
@@ -238,6 +252,12 @@ class Node:
     def shape_categories(self):
         """the categories this socket shape is allowed to be."""
         return SHAPE_CATEGORIES.get(self.socket_shape, ())
+
+    @property
+    def taken(self):
+        """already bought (by us, or by dbd auto-pathing through it) or eaten by the entity.
+        a taken node is never a buy target and is never identified, so it carries no glyph or match."""
+        return self.state != 'available'
 
     @property
     def cnn_rescued(self):
@@ -282,9 +302,10 @@ class Node:
         mirrors needs_resolution but spells out which check failed and with what values, so a debug
         log can say WHY ocr fired (weak score, attr disagreement) not just that it did.
         a pooled-out node (outside the match pool) is deliberately unidentified, so it carries no
-        reasons: it reads as unknown and is skipped, never routed to ocr.
+        reasons: it reads as unknown and is skipped, never routed to ocr. same for a taken node,
+        which can never be bought, so hovering it would burn a second of ocr for nothing.
         """
-        if self.pooled_out:
+        if self.pooled_out or self.taken:
             return []
         reasons = []
         if not self.confident:
@@ -342,6 +363,8 @@ class Node:
             return False # auto-spend node, the loop handles it, never a buy target
         if self.pooled_out:
             return False # outside the priority pool, left unidentified on purpose, never a target
+        if self.taken:
+            return False # already bought (ours or dbd's auto-path) or entity-eaten: clicking it does nothing
 
         rarity = rule.get("rarity")
         if rarity is not None and rarity != self.effective_rarity:

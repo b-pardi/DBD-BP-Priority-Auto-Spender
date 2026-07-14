@@ -1,6 +1,6 @@
-## v0.2.0-beta
+## v0.3.0-beta
 
-Flushed out details from the alpha build of the DBD Bloodweb Priority Auto-Spender as a standalone Windows app. No Python install needed.
+Spends your bloodpoints way smarter than the current auto spender (at least until Behaviour steals my idea again)
 
 **To run:**
 1. Download the zip folder below.

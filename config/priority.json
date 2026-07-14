@@ -3,141 +3,32 @@
   "dry_run": false,
   "stop_bp_threshold": 0,
   "priorities": [
-    {
-      "rules": [
-        {
-          "type": "category",
-          "category": "perk"
-        },
-        {
-          "type": "item",
-          "name": "high-End Sapphire Lens",
-          "rarity": "very rare"
-        },
-        {
-          "type": "item",
-          "name": "focus Lens",
-          "rarity": "uncommon"
-        },
-        {
-          "type": "item",
-          "name": "10th Anniversary",
-          "rarity": "event"
-        }
-      ],
-      "ordered": true
-    },
+    [
+      {
+        "type": "category",
+        "category": "perk"
+      }
+    ],
     {
       "rules": [
         {
           "type": "item",
-          "name": "Flashlight",
+          "name": "Deputy's Badge",
           "rarity": "very rare"
         },
         {
           "type": "item",
-          "name": "sport Flashlight",
+          "name": "Orderly's Shoe",
+          "rarity": "common"
+        },
+        {
+          "type": "item",
+          "name": "Eye Goop",
           "rarity": "rare"
         },
         {
           "type": "item",
-          "name": "banquet Flashlight",
-          "rarity": "event"
-        }
-      ],
-      "ordered": true
-    },
-    {
-      "rules": [
-        {
-          "type": "item",
-          "name": "long Life Battery",
-          "rarity": "rare"
-        },
-        {
-          "type": "item",
-          "name": "bloody Party Streamers",
-          "rarity": "rare"
-        },
-        {
-          "type": "item",
-          "name": "heavy Duty Battery",
-          "rarity": "uncommon"
-        },
-        {
-          "type": "item",
-          "name": "flashlight",
-          "rarity": "uncommon"
-        }
-      ],
-      "ordered": true
-    },
-    {
-      "rules": [
-        {
-          "type": "item",
-          "name": "alexs Toolbox",
-          "rarity": "very rare"
-        },
-        {
-          "type": "item",
-          "name": "commodious Toolbox",
-          "rarity": "rare"
-        },
-        {
-          "type": "item",
-          "name": "cutting Wire",
-          "rarity": "uncommon"
-        },
-        {
-          "type": "item",
-          "name": "grip Wrench",
-          "rarity": "rare"
-        }
-      ],
-      "ordered": true
-    },
-    {
-      "rules": [
-        {
-          "type": "item",
-          "name": "White Ward",
-          "rarity": "very rare"
-        },
-        {
-          "type": "item",
-          "name": "ranger Med Kit",
-          "rarity": "very rare"
-        },
-        {
-          "type": "item",
-          "name": "emergency Med Kit",
-          "rarity": "rare"
-        },
-        {
-          "type": "item",
-          "name": "engineers Toolbox",
-          "rarity": "very rare"
-        },
-        {
-          "type": "item",
-          "name": "banquet Med Kit",
-          "rarity": "event"
-        },
-        {
-          "type": "item",
-          "name": "banquet Toolbox",
-          "rarity": "event"
-        },
-        {
-          "type": "item",
-          "name": "mechanics Toolbox",
-          "rarity": "rare"
-        },
-        {
-          "type": "item",
-          "name": "first Aid Kit",
-          "rarity": "uncommon"
+          "name": "Dirty Money"
         }
       ],
       "ordered": true
@@ -145,7 +36,7 @@
   ],
   "debug": true,
   "profiles": {
-    "Flashy-Focused": [
+    "SourCat's browser history": [
       {
         "rules": [
           {
@@ -333,9 +224,572 @@
         ],
         "ordered": true
       }
+    ],
+    "A Gnat's Wet Dream": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        }
+      ],
+      {
+        "rules": [
+          {
+            "type": "item",
+            "name": "Utility Flashlight",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "High-End Sapphire Lens",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "Focus Lens",
+            "rarity": "uncommon"
+          },
+          {
+            "type": "item",
+            "name": "Odd Bulb"
+          }
+        ],
+        "ordered": true
+      },
+      {
+        "rules": [
+          {
+            "type": "item",
+            "name": "Long Life Battery",
+            "rarity": "rare"
+          },
+          {
+            "type": "item",
+            "name": "Banquet Flashlight",
+            "rarity": "event"
+          },
+          {
+            "type": "item",
+            "name": "Sport Flashlight",
+            "rarity": "rare"
+          },
+          {
+            "type": "item",
+            "name": "Heavy Duty Battery",
+            "rarity": "uncommon"
+          }
+        ],
+        "ordered": true
+      },
+      [
+        {
+          "type": "item",
+          "name": "Flashlight",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Low Amp Filament",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Intense Halogen",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "TIR Optic",
+          "rarity": "uncommon"
+        }
+      ]
+    ],
+    "Survivor BP Min-Max": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        }
+      ],
+      {
+        "rules": [
+          {
+            "type": "item",
+            "name": "Toothy Torte",
+            "rarity": "event"
+          },
+          {
+            "type": "item",
+            "name": "Bloody Party Streamers",
+            "rarity": "rare"
+          },
+          {
+            "type": "item",
+            "name": "Bound Envelope",
+            "rarity": "rare"
+          }
+        ],
+        "ordered": true
+      },
+      [
+        {
+          "type": "item",
+          "name": "Fragrant Sweet William",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Fragrant Primrose Blossom",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Fragrant Crispleaf Amaranth",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Fragrant Bog Laurel",
+          "rarity": "rare"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "Sealed Envelope",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Fresh Bog Laurel",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Fresh Crispleaf Amaranth",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Fresh Primrose Blossom",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Fresh Sweet William",
+          "rarity": "uncommon"
+        }
+      ]
+    ],
+    "Boonie": [
+      {
+        "rules": [
+          {
+            "type": "item",
+            "name": "Boon: Circle of Healing"
+          },
+          {
+            "type": "item",
+            "name": "Boon: Dark Theory"
+          },
+          {
+            "type": "item",
+            "name": "Boon: Exponential"
+          },
+          {
+            "type": "item",
+            "name": "Boon: Illumination"
+          },
+          {
+            "type": "item",
+            "name": "Boon: Shadow Step"
+          },
+          {
+            "type": "category",
+            "category": "perk"
+          }
+        ],
+        "ordered": true
+      },
+      [
+        {
+          "type": "item",
+          "name": "Annotated Map",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Sharpened Flint",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "Battered Tape",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Gnarled Compass",
+          "rarity": "uncommon"
+        }
+      ]
+    ],
+    "Sabby": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "Hacksaw",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Cutting Wire",
+          "rarity": "uncommon"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "Alex's Toolbox",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "Commodious Toolbox",
+          "rarity": "rare"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "Wire Spool",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Grip Wrench",
+          "rarity": "rare"
+        }
+      ]
+    ],
+    "Genny": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        }
+      ],
+      {
+        "rules": [
+          {
+            "type": "item",
+            "name": "Engineer's Toolbox",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "brand New Part"
+          },
+          {
+            "type": "item",
+            "name": "Mechanic's Toolbox",
+            "rarity": "rare"
+          }
+        ],
+        "ordered": true
+      },
+      [
+        {
+          "type": "item",
+          "name": "Socket Swivels",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Wire Spool",
+          "rarity": "uncommon"
+        }
+      ]
+    ],
+    "I got dumped riding Heely's in a Walmart Parking Lot": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        }
+      ],
+      {
+        "rules": [
+          {
+            "type": "item",
+            "name": "Ranger Med-Kit",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "Emergency Med-Kit",
+            "rarity": "rare"
+          },
+          {
+            "type": "item",
+            "name": "Gel Dressings"
+          },
+          {
+            "type": "item",
+            "name": "Abdominal Dressing",
+            "rarity": "very rare"
+          }
+        ],
+        "ordered": true
+      },
+      [
+        {
+          "type": "item",
+          "name": "anti-haemorrhagic Syringe"
+        },
+        {
+          "type": "item",
+          "name": "Gauze Roll",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Sponge",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Surgical Suture",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Styptic Agent",
+          "rarity": "very rare"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "First Aid Kit",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Banquet Med-Kit",
+          "rarity": "event"
+        }
+      ]
+    ],
+    "Staring Contest": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "Kavanagh's Last Breath",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "Heavy Panting",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Ataxic Respiration",
+          "rarity": "rare"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "Matchbox"
+        },
+        {
+          "type": "item",
+          "name": "Torn Bookmark"
+        }
+      ]
+    ],
+    "Piss Head": [],
+    "Oh My God Jason Bourne": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        }
+      ],
+      {
+        "rules": [
+          {
+            "type": "item",
+            "name": "Deputy's Badge",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "Orderly's Shoe",
+            "rarity": "common"
+          },
+          {
+            "type": "item",
+            "name": "Eye Goop",
+            "rarity": "rare"
+          },
+          {
+            "type": "item",
+            "name": "Dirty Money"
+          }
+        ],
+        "ordered": true
+      }
+    ],
+    "I <3 GF": [],
+    "Robo Bunny": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        }
+      ],
+      {
+        "rules": [
+          {
+            "type": "item",
+            "name": "Loot Bag",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "Faz-Coin"
+          },
+          {
+            "type": "item",
+            "name": "Celebrate! Poster",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "Access Panel",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "Security Guard's Badge",
+            "rarity": "uncommon"
+          },
+          {
+            "type": "item",
+            "name": "Foxy's Hook",
+            "rarity": "rare"
+          }
+        ],
+        "ordered": true
+      }
+    ],
+    "Whiskers": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        }
+      ],
+      {
+        "rules": [
+          {
+            "type": "item",
+            "name": "Egg (Gold)",
+            "rarity": "rare"
+          },
+          {
+            "type": "item",
+            "name": "Iridescent Uroboros Vial"
+          },
+          {
+            "type": "item",
+            "name": "Lab Photo"
+          },
+          {
+            "type": "item",
+            "name": "Uroboros Virus",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "Green Herb",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "Dark Sunglasses",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "Helicopter Stick",
+            "rarity": "very rare"
+          },
+          {
+            "type": "item",
+            "name": "Red Herb",
+            "rarity": "rare"
+          },
+          {
+            "type": "item",
+            "name": "Loose Crank",
+            "rarity": "uncommon"
+          }
+        ],
+        "ordered": true
+      }
+    ],
+    "Shrek Voice Actor": [
+      [
+        {
+          "type": "category",
+          "category": "perk"
+        }
+      ],
+      [
+        {
+          "type": "item",
+          "name": "Jewellery",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Hair Bow",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Scratched Mirror"
+        },
+        {
+          "type": "item",
+          "name": "Hair Brush",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Tombstone Piece",
+          "rarity": "very rare"
+        }
+      ]
     ]
   },
-  "active_profile": "Flashy-Focused",
+  "active_profile": "Oh My God Jason Bourne",
   "show_tooltips": true,
   "hide_unavailable": false,
   "start_key": "f7",
@@ -354,5 +808,6 @@
   "stop_level": 0,
   "weak_match_fallback": true,
   "ui_scale": 1.15,
-  "entity_race": false
+  "entity_race": false,
+  "entity_settle_s": 0.4
 }

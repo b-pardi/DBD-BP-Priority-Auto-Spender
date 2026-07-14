@@ -41,7 +41,8 @@ class DebugScreen(ctk.CTkFrame):
         self._log_q = queue.Queue()
         self._tk_img = None        # keep a ref so the canvas PhotoImage isn't garbage-collected
         self._scraping = False
-        self._last_frame = None    # newest raw bgr frame, kept full-res for zoom/save
+        self._last_frame = None    # newest annotated bgr frame, kept full-res for zoom/save
+        self._last_raw = None      # the clean grab behind it (None until a run supplies one)
         # zoom is always a real percent of native. _fit=True re-derives that percent to fit the panel
         # on each frame (and the % is shown), so zooming in/out steps from the actual fit scale rather
         # than jumping as if the fit view were 100%.
@@ -55,13 +56,15 @@ class DebugScreen(ctk.CTkFrame):
         self.after(100, self._poll)
 
     # thread-safe producers (called from worker threads)
-    def push_frame(self, bgr):
-        """replace the displayed frame with the newest annotated bgr frame (drops any stale one)."""
+    def push_frame(self, bgr, raw=None):
+        """replace the displayed frame with the newest annotated bgr frame (drops any stale one).
+        raw, when given, is the clean grab the overlay was drawn on; kept alongside so Save frame
+        can write both (a bug report wants the overlay AND the frame to re-run detection on)."""
         try:
             self._frame_q.get_nowait()
         except queue.Empty:
             pass
-        self._frame_q.put(bgr)
+        self._frame_q.put((bgr, raw))
 
     def log(self, line):
         self._log_q.put(line)
@@ -186,7 +189,9 @@ class DebugScreen(ctk.CTkFrame):
         self.scrape_btn = ctk.CTkButton(scrp, text="Run scraper", command=self._run_scraper)
         self.scrape_btn.pack(fill="x", padx=theme.PAD, pady=(2, theme.PAD))
 
-        self.logbox = ctk.CTkTextbox(right, height=160, font=theme.FONT_SMALL)
+        # a textbox is borderless by default and its fill is the same charcoal as the column it sits
+        # in, so without the hairline it has no edge at all and the log reads as loose text.
+        self.logbox = ctk.CTkTextbox(right, height=160, font=theme.FONT_SMALL, border_width=1)
         self.logbox.pack(fill="both", expand=True, padx=theme.PAD, pady=(0, theme.PAD))
 
     # main-thread pump
@@ -197,7 +202,9 @@ class DebugScreen(ctk.CTkFrame):
         except queue.Empty:
             pass
         try:
-            self._render_frame(self._frame_q.get_nowait())
+            bgr, raw = self._frame_q.get_nowait()
+            self._last_raw = raw
+            self._render_frame(bgr)
         except queue.Empty:
             pass
         try:
@@ -288,14 +295,21 @@ class DebugScreen(ctk.CTkFrame):
         return "break"
 
     def _save_frame(self):
+        """write the shown frame to the debug folder: the annotated overlay plus, when a run
+        supplied it, the raw grab it was drawn on (that's the one detection can be re-run against)."""
         if self._last_frame is None:
             self._append_log("no frame to save yet")
             return
         out_dir = paths.debug_dir()
         out_dir.mkdir(parents=True, exist_ok=True)
-        out_path = out_dir / f"frame_{time.strftime('%Y%m%d_%H%M%S')}.png"
+        tag = time.strftime("%Y%m%d_%H%M%S")
+        out_path = out_dir / f"frame_{tag}_annotated.png"
         cv2.imwrite(str(out_path), self._last_frame)
         self._append_log(f"saved frame: {out_path}")
+        if self._last_raw is not None:
+            raw_path = out_dir / f"frame_{tag}_raw.png"
+            cv2.imwrite(str(raw_path), self._last_raw)
+            self._append_log(f"saved frame: {raw_path}")
 
     # maintenance actions
     def _open(self, path):

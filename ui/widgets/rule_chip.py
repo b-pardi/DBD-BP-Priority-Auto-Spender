@@ -16,6 +16,7 @@ down and rebuilding ~10 ctk widgets per chip.
 
 import customtkinter as ctk
 
+from ..library import tooltip_text
 from ..theme import ACCENT_W, CHIP_H, FONT_BODY, FONT_SMALL, PAD, THUMB_PX, rarity_color
 from .dragdrop import Draggable
 from .tooltip import bind_tooltip
@@ -77,10 +78,10 @@ class RuleChip(ctk.CTkFrame):
             self._drag_cells.append(name_lbl)
             # the leftmost body widget, so the ordered-tier controls below know what to pack before.
             self._anchor = thumb if row is not None else name_lbl
-            # hover tooltip: the looked-up library row's lead sentence (a chip is bound to one rule
-            # for its whole life, so the text is fixed at build time). no row / no desc -> no popup.
-            desc = row.get("desc", "") if row is not None else ""
-            bind_tooltip(tip_targets, lambda d=desc: d)
+            # hover tooltip: the looked-up row's lead sentence + rendered effect text (a chip is
+            # bound to one rule for its whole life, so the text is fixed at build time).
+            tip = tooltip_text(row)
+            bind_tooltip(tip_targets, lambda t=tip: t)
             # rarity badge doubles as the pin/any toggle; sync() re-skins it when it's toggled.
             self.rarity_btn = ctk.CTkButton(self, width=70, font=FONT_SMALL,
                                             text=(rar or "any rarity"), fg_color=rarity_color(rar),

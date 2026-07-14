@@ -49,6 +49,15 @@ NCC_MARGIN_MIN = 0.03
 PHASH_MARGIN_MIN = 2
 
 
+def set_rescue_gate(min_score=CNN_RESCUE_MIN, margin=CNN_RESCUE_MARGIN):
+    """runtime override of the rescue gate from config (settings ui: matcher_rescue_min/_margin),
+    so the gate can be tuned on another user's machine without shipping a build. the gate is not
+    calibrated yet (see the note above), which is exactly why it's a knob."""
+    global CNN_RESCUE_MIN, CNN_RESCUE_MARGIN
+    CNN_RESCUE_MIN = float(min_score)
+    CNN_RESCUE_MARGIN = float(margin)
+
+
 def tier_rules(tier):
     """the rule dicts of one priority tier, tolerating either config shape.
     canonically a tier is {"rules": [...], "ordered": bool}, but an old/migrated/hand-edited file may

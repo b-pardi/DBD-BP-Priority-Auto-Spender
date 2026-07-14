@@ -206,7 +206,7 @@ def _embedding_neighbors(model, A_u8, dev, k=8, skip=1, bs=512):
     so half the batches harden against the wrong adversary while the pairs the model actually gets
     wrong may never share a batch. mining the live embedding instead closes the loop: negatives track
     what the model confuses NOW, and move on as it fixes them. that's aimed squarely at the symptom
-    -- real top5 98.6% vs top1 83.1% means the answer is in the shortlist and only the ranking among
+    real top5 98.6% vs top1 83.1% means the answer is in the shortlist and only the ranking among
     near neighbours is weak, which is exactly what hard negatives train (and what trips the ocr gate).
 
     skip drops the nearest few (semi-hard): always feeding the single hardest negative destabilises
@@ -222,7 +222,6 @@ def _embedding_neighbors(model, A_u8, dev, k=8, skip=1, bs=512):
     return nn.cpu().numpy()
 
 
-# ------------------------------------------------------------------------------- training
 
 def _sample_classes(n, N, nn, p_family, rng):
     """N distinct class indices for one batch. with prob p_family, grow the batch from a few seed

@@ -185,9 +185,11 @@ class App(ctk.CTk):
     def _build_screens(self):
         self.screens["priorities"] = PrioritiesScreen(self.content, self)
         self.screens["settings"] = SettingsScreen(self.content, self)
+        # debug before run: the run screen arms its controller at build time (so the start hotkey
+        # works from launch) and wires the debug screen's frame/status sinks into it right then.
+        self.screens["debug"] = DebugScreen(self.content, self)
         self.screens["run"] = RunScreen(self.content, self)
         self.screens["instructions"] = InstructionsScreen(self.content, self)
-        self.screens["debug"] = DebugScreen(self.content, self)
         for s in self.screens.values():
             s.grid(row=0, column=0, sticky="nsew")  # stacked; show() raises one
 
@@ -237,7 +239,7 @@ class App(ctk.CTk):
                 "update available",
                 f"A new version ({info['tag']}) is available (you have "
                 f"{updater.current_version()}).\n\nSelf-install only works in the packaged app. "
-                "Open the download page?",
+                f"Open the download page?\n\n{updater.ICONS_NOTE}",
             ):
                 webbrowser.open(info["page"])
             return
@@ -245,7 +247,7 @@ class App(ctk.CTk):
             "update available",
             f"A new version ({info['tag']}) is available (you have {updater.current_version()}).\n\n"
             "Download and install it now? The app will update itself and restart, you don't need "
-            "to do anything.",
+            f"to do anything.\n\n{updater.ICONS_NOTE}",
         ):
             updater.download_and_install(self, info)
 

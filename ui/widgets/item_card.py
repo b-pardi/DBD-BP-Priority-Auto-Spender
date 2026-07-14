@@ -7,6 +7,7 @@ priorities screen can add it (left) without the card knowing what a tier is.
 
 import customtkinter as ctk
 
+from ..library import tooltip_text
 from ..theme import (
     ACCENT_W, FONT_BODY, FONT_SMALL, MUTED_TEXT_COLOR, PAD, ROW_H, THUMB_PX, rarity_color,
 )
@@ -49,10 +50,11 @@ class ItemCard(ctk.CTkFrame):
         )
         for w in cells:
             w.bind("<Button-3>", lambda e: self._activate(3))
-        # hover tooltip: the wiki lead sentence for whatever row this (recycled) card holds.
+        # hover tooltip: the wiki lead sentence + rendered effect text for whatever row this
+        # (recycled) card holds.
         bind_tooltip(
             [self, self.accent, self.icon, self.name, self.rar],
-            lambda: (self.row or {}).get("desc", ""),
+            lambda: tooltip_text(self.row),
         )
 
     def bind_row(self, row):

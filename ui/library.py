@@ -13,6 +13,7 @@ the thread only produces PIL images and the CTkImage wrapper is built on the mai
 ~1us) the first time a row is actually drawn.
 """
 
+import re
 import threading
 from pathlib import Path
 
@@ -23,6 +24,13 @@ from src import detect
 from src.node import dedup_index_rows, normalize_name, row_names
 
 from .theme import THUMB_PX
+
+def tooltip_text(row):
+    """the hover-tooltip body for a row: the wiki lead sentence plus, when the scrape rendered
+    one, the actual gameplay text underneath (scraper.fill_effects; '' on pre-effect indexes)."""
+    if not row:
+        return ""
+    return "\n\n".join(p for p in (row.get("desc") or "", row.get("effect") or "") if p)
 
 
 class Library:
@@ -55,11 +63,39 @@ class Library:
         for r in self.rows:
             for alias in r.get("aliases") or []:
                 self._by_key.setdefault(normalize_name(alias), r)
+        self._killers = self._killer_labels()
 
-    def filter(self, query="", category="all", rarity="all", role="all", show_unavailable=False):
+    def _killer_labels(self):
+        """{filter label: set of owner keys} for every killer with add-ons in the index.
+        the label is the row's own scraped `killer` name (joined off the wiki's lua data modules,
+        see scraper.fetch_killer_map), falling back to the power name parsed off one of its add-ons'
+        lead sentences ("... is a Rare Add-on for Bear Trap.") -- which is what an index scraped
+        before that field existed reads as, so those still filter, just labelled by power.
+        survivor item families (medkits, flashlights, ...) share the addon category but sit on the
+        survivor side, so they never land here."""
+        labels = {}
+        for r in self.rows:
+            if r.get("category") != "addon" or r.get("side") != "killer":
+                continue
+            owner = r.get("owner")
+            if not owner or owner == "unused":
+                continue
+            label = r.get("killer")
+            if label is None:
+                m = re.search(r"Add-on for (.+?)\.", r.get("desc") or "")
+                label = m.group(1) if m else owner
+            labels.setdefault(label, set()).add(owner)
+        return labels
+
+    def killer_names(self):
+        """sorted filter labels for the per-killer role dropdown."""
+        return sorted(self._killers)
+
+    def filter(self, query="", category="all", rarity="all", role="all",
+               show_event=True, show_na=False):
         """rows matching the search box + dropdowns. case/punctuation-insensitive name search
         (folded like the detector via node.normalize_name), category exact, rarity exact with a
-        'none' bucket for null-rarity rows (perks/powers/visceral).
+        'none' bucket for null-rarity rows (perks/powers).
 
         the search also looks through a row's aliases (the wiki's redirects to its article, plus the
         name we used before that article was resolved), so the offering the game calls "Toothy Torte"
@@ -67,26 +103,39 @@ class Library:
         a perk renamed off its lost licence still answers to what people call it ("Decisive Strike",
         "DS" -> Will to Live).
 
-        role ('all'|'killer'|'survivor') filters by who plays the glyph, strictly: a pick shows only
-        rows whose role/side is exactly that side. items (survivor), powers (killer), and perks (per
-        the wiki role categories) carry a role; add-ons instead carry a `side` (whose power/item they
-        belong to), so we fall back to that when role is absent. offerings (and any row with neither
-        field) have no side on the wiki, so a killer/survivor pick hides them; only 'all' shows them.
+        role ('all'|'killer'|'survivor'|a killer name from killer_names()) filters by who plays the
+        glyph, strictly: a side pick shows only rows whose role/side is exactly that side. items
+        (survivor), powers (killer), and perks (per the wiki role categories) carry a role; add-ons
+        instead carry a `side` (whose power/item they belong to), so we fall back to that when role
+        is absent. offerings (and any row with neither field) have no side on the wiki, so a
+        killer/survivor pick hides them; only 'all' shows them. a specific killer narrows further:
+        killer-side rows, with add-ons kept only when they belong to that killer's power — i.e. that
+        killer's own bloodweb content (shared killer perks included).
         rows from an index predating the role/side scrape are all null and so only appear under 'all'.
 
-        show_unavailable=False (the default) hides glyphs you can't buy in a current bloodweb:
-        'event' (past-event skins) and 'unavailable' (killer powers, retired offerings). rows from
-        an index predating the obtainability scrape lack the field and count as 'normal'."""
+        the reveal toggles hide glyphs you can't buy in a current bloodweb: show_event (default on)
+        governs the 'event' tier (past-event skins), show_na (default off) the 'unavailable' bucket
+        (killer powers, retired offerings). rows from an index predating the obtainability scrape
+        lack the field and count as 'normal'."""
         q = normalize_name(query)
+        side, owners = role, None
+        if role not in ("all", "killer", "survivor"):   # a specific killer from killer_names()
+            side, owners = "killer", self._killers.get(role, set())
         out = []
         for r in self.rows:
-            if not show_unavailable and r.get("obtainable", "normal") != "normal":
+            obt = r.get("obtainable", "normal")
+            if obt == "event" and not show_event:
+                continue
+            if obt == "unavailable" and not show_na:
                 continue
             if category != "all" and r.get("category") != category:
                 continue
-            if role != "all":
+            if side != "all":
                 rr = r.get("role") or r.get("side")
-                if rr != role:   # strict: no side (offerings/old rows) only shows under 'all'
+                if rr != side:   # strict: no side (offerings/old rows) only shows under 'all'
+                    continue
+                if owners is not None and r.get("category") == "addon" \
+                        and r.get("owner") not in owners:
                     continue
             if rarity == "none":
                 if r.get("rarity") is not None:

@@ -3,36 +3,172 @@
   "dry_run": false,
   "stop_bp_threshold": 0,
   "priorities": [
-    [
-      {
-        "type": "category",
-        "category": "perk"
-      }
-    ],
     {
       "rules": [
         {
+          "type": "category",
+          "category": "perk"
+        },
+        {
           "type": "item",
-          "name": "Deputy's Badge",
+          "name": "high-End Sapphire Lens",
           "rarity": "very rare"
         },
         {
           "type": "item",
-          "name": "Orderly's Shoe",
-          "rarity": "common"
+          "name": "focus Lens",
+          "rarity": "uncommon"
         },
         {
           "type": "item",
-          "name": "Eye Goop",
+          "name": "10th Anniversary",
+          "rarity": "event"
+        }
+      ],
+      "ordered": true
+    },
+    {
+      "rules": [
+        {
+          "type": "item",
+          "name": "Utility Flashlight",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "sport Flashlight",
           "rarity": "rare"
         },
         {
           "type": "item",
-          "name": "Dirty Money"
+          "name": "banquet Flashlight",
+          "rarity": "event"
         }
       ],
       "ordered": true
-    }
+    },
+    {
+      "rules": [
+        {
+          "type": "item",
+          "name": "long Life Battery",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "bloody Party Streamers",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "heavy Duty Battery",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "flashlight",
+          "rarity": "uncommon"
+        }
+      ],
+      "ordered": true
+    },
+    {
+      "rules": [
+        {
+          "type": "item",
+          "name": "alexs Toolbox",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "commodious Toolbox",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Hacksaw",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "cutting Wire",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Brand New Part",
+          "rarity": "ultra rare"
+        }
+      ],
+      "ordered": true
+    },
+    {
+      "rules": [
+        {
+          "type": "item",
+          "name": "White Ward",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "ranger Med Kit",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "engineers Toolbox",
+          "rarity": "very rare"
+        },
+        {
+          "type": "item",
+          "name": "Gel Dressings",
+          "rarity": "ultra rare"
+        },
+        {
+          "type": "item",
+          "name": "Abdominal Dressing",
+          "rarity": "very rare"
+        }
+      ],
+      "ordered": true
+    },
+    [
+      {
+        "type": "item",
+        "name": "mechanics Toolbox",
+        "rarity": "rare"
+      },
+      {
+        "type": "item",
+        "name": "banquet Toolbox",
+        "rarity": "event"
+      },
+      {
+        "type": "item",
+        "name": "banquet Med Kit",
+        "rarity": "event"
+      },
+      {
+        "type": "item",
+        "name": "first Aid Kit",
+        "rarity": "uncommon"
+      },
+      {
+        "type": "item",
+        "name": "emergency Med Kit",
+        "rarity": "rare"
+      },
+      {
+        "type": "item",
+        "name": "Escape! Cake",
+        "rarity": "uncommon"
+      },
+      {
+        "type": "item",
+        "name": "Low Amp Filament",
+        "rarity": "uncommon"
+      }
+    ]
   ],
   "debug": true,
   "profiles": {
@@ -65,7 +201,7 @@
         "rules": [
           {
             "type": "item",
-            "name": "Flashlight",
+            "name": "Utility Flashlight",
             "rarity": "very rare"
           },
           {
@@ -120,13 +256,18 @@
           },
           {
             "type": "item",
+            "name": "Hacksaw",
+            "rarity": "rare"
+          },
+          {
+            "type": "item",
             "name": "cutting Wire",
             "rarity": "uncommon"
           },
           {
             "type": "item",
-            "name": "grip Wrench",
-            "rarity": "rare"
+            "name": "Brand New Part",
+            "rarity": "ultra rare"
           }
         ],
         "ordered": true
@@ -145,37 +286,59 @@
           },
           {
             "type": "item",
-            "name": "emergency Med Kit",
-            "rarity": "rare"
-          },
-          {
-            "type": "item",
             "name": "engineers Toolbox",
             "rarity": "very rare"
           },
           {
             "type": "item",
-            "name": "banquet Med Kit",
-            "rarity": "event"
+            "name": "Gel Dressings",
+            "rarity": "ultra rare"
           },
           {
             "type": "item",
-            "name": "banquet Toolbox",
-            "rarity": "event"
-          },
-          {
-            "type": "item",
-            "name": "mechanics Toolbox",
-            "rarity": "rare"
-          },
-          {
-            "type": "item",
-            "name": "first Aid Kit",
-            "rarity": "uncommon"
+            "name": "Abdominal Dressing",
+            "rarity": "very rare"
           }
         ],
         "ordered": true
-      }
+      },
+      [
+        {
+          "type": "item",
+          "name": "mechanics Toolbox",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "banquet Toolbox",
+          "rarity": "event"
+        },
+        {
+          "type": "item",
+          "name": "banquet Med Kit",
+          "rarity": "event"
+        },
+        {
+          "type": "item",
+          "name": "first Aid Kit",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "emergency Med Kit",
+          "rarity": "rare"
+        },
+        {
+          "type": "item",
+          "name": "Escape! Cake",
+          "rarity": "uncommon"
+        },
+        {
+          "type": "item",
+          "name": "Low Amp Filament",
+          "rarity": "uncommon"
+        }
+      ]
     ],
     "template": [
       [
@@ -251,7 +414,8 @@
           },
           {
             "type": "item",
-            "name": "Odd Bulb"
+            "name": "Odd Bulb",
+            "rarity": "ultra rare"
           }
         ],
         "ordered": true
@@ -494,7 +658,8 @@
           },
           {
             "type": "item",
-            "name": "brand New Part"
+            "name": "brand New Part",
+            "rarity": "ultra rare"
           },
           {
             "type": "item",
@@ -538,7 +703,8 @@
           },
           {
             "type": "item",
-            "name": "Gel Dressings"
+            "name": "Gel Dressings",
+            "rarity": "ultra rare"
           },
           {
             "type": "item",
@@ -551,7 +717,8 @@
       [
         {
           "type": "item",
-          "name": "anti-haemorrhagic Syringe"
+          "name": "anti-haemorrhagic Syringe",
+          "rarity": "ultra rare"
         },
         {
           "type": "item",
@@ -614,11 +781,13 @@
       [
         {
           "type": "item",
-          "name": "Matchbox"
+          "name": "Matchbox",
+          "rarity": "ultra rare"
         },
         {
           "type": "item",
-          "name": "Torn Bookmark"
+          "name": "Torn Bookmark",
+          "rarity": "ultra rare"
         }
       ]
     ],
@@ -649,7 +818,8 @@
           },
           {
             "type": "item",
-            "name": "Dirty Money"
+            "name": "Dirty Money",
+            "rarity": "ultra rare"
           }
         ],
         "ordered": true
@@ -672,7 +842,8 @@
           },
           {
             "type": "item",
-            "name": "Faz-Coin"
+            "name": "Faz-Coin",
+            "rarity": "ultra rare"
           },
           {
             "type": "item",
@@ -714,11 +885,13 @@
           },
           {
             "type": "item",
-            "name": "Iridescent Uroboros Vial"
+            "name": "Iridescent Uroboros Vial",
+            "rarity": "ultra rare"
           },
           {
             "type": "item",
-            "name": "Lab Photo"
+            "name": "Lab Photo",
+            "rarity": "ultra rare"
           },
           {
             "type": "item",
@@ -774,7 +947,8 @@
         },
         {
           "type": "item",
-          "name": "Scratched Mirror"
+          "name": "Scratched Mirror",
+          "rarity": "ultra rare"
         },
         {
           "type": "item",
@@ -789,25 +963,46 @@
       ]
     ]
   },
-  "active_profile": "Oh My God Jason Bourne",
+  "active_profile": "SourCat's browser history",
+  "profile_roles": {
+    "SourCat's browser history": "survivor",
+    "template": "survivor",
+    "A Gnat's Wet Dream": "survivor",
+    "Survivor BP Min-Max": "survivor",
+    "Boonie": "survivor",
+    "Sabby": "survivor",
+    "Genny": "survivor",
+    "I got dumped riding Heely's in a Walmart Parking Lot": "survivor",
+    "Staring Contest": "killer",
+    "Piss Head": "killer",
+    "Oh My God Jason Bourne": "killer",
+    "I <3 GF": "killer",
+    "Robo Bunny": "killer",
+    "Whiskers": "killer",
+    "Shrek Voice Actor": "killer"
+  },
   "show_tooltips": true,
-  "hide_unavailable": false,
+  "show_event": true,
+  "show_na": false,
   "start_key": "f7",
   "kill_key": "f8",
   "matcher": "cnn",
   "thresh_method": "adaptive_gaussian",
-  "settle_s": 1.6,
+  "settle_s": 1.1,
   "node_finder": "hough",
   "ocr_hover_s": 0.2,
   "advance_s": 6.5,
   "pool_inferred": true,
   "pool_exclusive": false,
   "auto_prestige": true,
-  "prestige_wait_s": 6.0,
+  "prestige_wait_s": 7.4,
   "stop_prestige": 0,
   "stop_level": 0,
   "weak_match_fallback": true,
   "ui_scale": 1.15,
-  "entity_race": false,
-  "entity_settle_s": 0.4
+  "entity_race": true,
+  "entity_settle_s": 0.65,
+  "presence_thresh": 0.31,
+  "matcher_rescue_min": 0.5,
+  "matcher_rescue_margin": 0.1
 }

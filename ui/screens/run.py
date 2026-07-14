@@ -7,12 +7,15 @@ game needed); a live, non-dry run is the only mode that actually clicks. the log
 """
 
 import queue
+import webbrowser
 
 import customtkinter as ctk
 
 from .. import theme
 from ..library import Library
 from ..run_controller import RunController
+
+GITHUB_URL = "https://github.com/b-pardi/DBD-BP-Priority-Auto-Spender"
 
 
 class RunScreen(ctk.CTkFrame):
@@ -25,17 +28,31 @@ class RunScreen(ctk.CTkFrame):
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
 
-        ctk.CTkLabel(self, text="Run", font=theme.FONT_TITLE).grid(
-            row=0, column=0, sticky="w", padx=theme.PAD, pady=theme.PAD)
+        keys = app.app_state.config or {}
+        self._start_key = keys.get("start_key", "f7")
+        self._kill_key = keys.get("kill_key", "f8")
+
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=theme.PAD, pady=theme.PAD)
+        ctk.CTkLabel(head, text="Run", font=theme.FONT_TITLE).pack(side="left")
+        # a soft ask, not a nag: the github page is also where updates and fixes land.
+        follow = ctk.CTkLabel(
+            head, text="enjoying it? ★ follow the project on GitHub",
+            font=("Segoe UI", 11, "underline"), text_color=theme.ACCENT_BRIGHT, cursor="hand2")
+        follow.pack(side="right")
+        follow.bind("<Button-1>", lambda e: webbrowser.open(GITHUB_URL))
 
         bar = ctk.CTkFrame(self)
         bar.grid(row=1, column=0, sticky="ew", padx=theme.PAD, pady=theme.PAD)
         # start is the app's one primary action, so it gets the ember accent; stop is destructive,
-        # so it gets the only other tinted button in the app (see theme).
-        self.start_btn = ctk.CTkButton(bar, text="Start", width=110, fg_color=theme.ACCENT,
+        # so it gets the only other tinted button in the app (see theme). both carry their global
+        # hotkey in the label, so nobody has to dig through settings to learn the keys.
+        self.start_btn = ctk.CTkButton(bar, text=f"Start ({self._start_key})", width=130,
+                                       fg_color=theme.ACCENT,
                                        hover_color=theme.ACCENT_HOVER, command=self._start)
         self.start_btn.pack(side="left", padx=theme.PAD, pady=theme.PAD)
-        self.stop_btn = ctk.CTkButton(bar, text="Stop", width=90, fg_color=theme.DANGER,
+        self.stop_btn = ctk.CTkButton(bar, text=f"Stop ({self._kill_key})", width=110,
+                                      fg_color=theme.DANGER,
                                       hover_color=theme.DANGER_HOVER,
                                       command=self._stop)
         self.stop_btn.pack(side="left", padx=(0, theme.PAD), pady=theme.PAD)
@@ -55,16 +72,19 @@ class RunScreen(ctk.CTkFrame):
         self.debug_chk.pack(side="right", padx=theme.PAD)
         self._sync_toggles()
 
-        keys = app.app_state.config or {}
         ctk.CTkLabel(
             self, font=theme.FONT_SMALL, justify="left",
-            text=(f"hotkeys: {keys.get('start_key', 'f7')} start/pause, "
-                  f"{keys.get('kill_key', 'f8')} stop. live (non-dry, non-sim) runs click in-game."),
+            text=(f"hotkeys work globally, even with the game focused: {self._start_key} "
+                  f"starts / pauses / resumes, {self._kill_key} stops. "
+                  "live (non-dry, non-sim) runs click in-game."),
         ).grid(row=3, column=0, sticky="w", padx=theme.PAD)
 
         self.logbox = ctk.CTkTextbox(self, font=theme.FONT_SMALL)
         self.logbox.grid(row=2, column=0, sticky="nsew", padx=theme.PAD, pady=theme.PAD)
 
+        # arm the controller (and so the global hotkeys) at build time, not on the first Start
+        # click: the start hotkey now starts runs too, and it can't do that while unregistered.
+        self._ensure_controller()
         self.after(150, self._poll)
 
     def _sync_toggles(self):
@@ -118,10 +138,20 @@ class RunScreen(ctk.CTkFrame):
         except queue.Empty:
             pass
 
+        # the start hotkey as a start button: pressed with no run thread alive (fresh launch, or a
+        # finished/stopped run) it spawns a run with the current toggles, exactly like clicking
+        # Start — so you can set up, tab into the game, and start from there. with a thread alive
+        # the switch toggle has already handled pause/resume, so the event is just dropped.
+        if self.controller is not None and self.controller.hotkey_start.is_set():
+            self.controller.hotkey_start.clear()
+            if not (self.controller.thread and self.controller.thread.is_alive()):
+                self._start()
+
         state = self.controller.state() if self.controller else "Idle"
         self.status.configure(text=state)
         self.start_btn.configure(
-            text={"Idle": "Start", "Running": "Pause", "Paused": "Resume"}[state])
+            text={"Idle": "Start", "Running": "Pause", "Paused": "Resume"}[state]
+                 + f" ({self._start_key})")
         # lock the mode toggles while a run thread is active so they can't change mid-run.
         active = (self.controller is not None and self.controller.thread is not None
                   and self.controller.thread.is_alive())

@@ -187,7 +187,14 @@ def refine_ref_hsvs(disk_samples, seed=None, out_path=USR_HSV, min_samples=3):
 def load_rows(index_path=DEFAULT_INDEX):
     """just the metadata rows, no phashes. the ui only ever needs names/rarities/sprite paths, and
     stacking the phashes costs ~20ms of startup it would never look at."""
-    return json.loads(Path(index_path).read_text(encoding="utf-8"))
+    rows = json.loads(Path(index_path).read_text(encoding="utf-8"))
+    # backfill for indexes scraped before the wiki's "Visceral" tier was recognized: those rows have
+    # rarity null but their lead sentence says so ("... is a Visceral Add-on ..."). in-game they draw
+    # the iridescent pink disk, so they are our "ultra rare"; fixing here spares users a re-scrape.
+    for r in rows:
+        if r.get("rarity") is None and "is a Visceral" in (r.get("desc") or ""):
+            r["rarity"] = "ultra rare"
+    return rows
 
 
 def load_index(index_path=DEFAULT_INDEX):
@@ -540,6 +547,13 @@ PRESENCE_THRESH = 0.32   # presence floor: real misses scored >=0.39, empty slot
 PRESENCE_MIN_N = 40      # nodes the template must average before recovery runs (~2 scans)
 PRESENCE_MAX_N = 2000    # stop accumulating here, the mean is long converged
 TPL_CANON = 2 * PRESENCE_HALF   # template edge at baseline scale, one cache serves any resolution
+
+
+def set_presence_thresh(v=PRESENCE_THRESH):
+    """runtime override of the presence floor from config (settings ui: presence_thresh), so the
+    0.39-vs-0.27 separation measured here can be re-tuned live on machines that read differently."""
+    global PRESENCE_THRESH
+    PRESENCE_THRESH = float(v)
 
 
 def lattice_slots(cx, cy, scale):

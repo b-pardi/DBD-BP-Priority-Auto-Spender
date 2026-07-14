@@ -52,8 +52,11 @@ class SettingsScreen(ctk.CTkFrame):
         # title (pinned) / scrollable body (row 1) / Save bar (pinned, row 2)
         self.grid_rowconfigure(1, weight=1)
         self.grid_columnconfigure(0, weight=1)
-        ctk.CTkLabel(self, text="Settings", font=theme.FONT_TITLE).grid(
-            row=0, column=0, sticky="w", padx=theme.PAD, pady=theme.PAD)
+        head = ctk.CTkFrame(self, fg_color="transparent")
+        head.grid(row=0, column=0, sticky="ew", padx=theme.PAD, pady=theme.PAD)
+        ctk.CTkLabel(head, text="Settings", font=theme.FONT_TITLE).pack(side="left")
+        ctk.CTkLabel(head, text="every knob here is explained in the Instructions tab",
+                     font=theme.FONT_SMALL, text_color="gray").pack(side="left", padx=theme.PAD)
 
         self.scroll = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.scroll.grid(row=1, column=0, sticky="nsew", padx=theme.PAD)
@@ -116,6 +119,37 @@ class SettingsScreen(ctk.CTkFrame):
         self.node_finder = ctk.CTkOptionMenu(g, width=180, values=["contours", "hough"])
         self.node_finder.set(cfg.get("node_finder", "contours"))
         self.node_finder.grid(row=2, column=1, sticky="w", pady=4)
+        # presence floor: the matched-filter score an empty lattice slot must beat to be recovered
+        # as a missed node (detect.recover_missed_slots). exposed so it can be tuned live on a
+        # machine whose capture reads differently from the one it was calibrated on.
+        ctk.CTkLabel(g, text="Presence threshold", anchor="w", width=LABEL_W).grid(
+            row=3, column=0, sticky="w", pady=4)
+        self.presence = ctk.CTkEntry(g, width=120)
+        self.presence.insert(0, str(cfg.get("presence_thresh", spender.PRESENCE_THRESH_DEFAULT)))
+        self.presence.grid(row=3, column=1, sticky="w", pady=4)
+        ctk.CTkLabel(g, text="lower finds more missed nodes, too low invents them",
+                     font=theme.FONT_SMALL, text_color="gray").grid(
+            row=3, column=2, sticky="w", padx=theme.PAD)
+        # matcher rescue gate (node.set_rescue_gate): a mid-score icon match is trusted anyway when
+        # its runner-up trails by at least the margin, which keeps near-certain matches off the
+        # slow ocr path. score direction: higher = more similar.
+        ctk.CTkLabel(g, text="Matcher rescue min score", anchor="w", width=LABEL_W).grid(
+            row=4, column=0, sticky="w", pady=4)
+        self.rescue_min = ctk.CTkEntry(g, width=120)
+        self.rescue_min.insert(0, str(cfg.get("matcher_rescue_min", spender.RESCUE_MIN_DEFAULT)))
+        self.rescue_min.grid(row=4, column=1, sticky="w", pady=4)
+        ctk.CTkLabel(g, text="lowest match score the rescue below may vouch for",
+                     font=theme.FONT_SMALL, text_color="gray").grid(
+            row=4, column=2, sticky="w", padx=theme.PAD)
+        ctk.CTkLabel(g, text="Matcher rescue margin", anchor="w", width=LABEL_W).grid(
+            row=5, column=0, sticky="w", pady=4)
+        self.rescue_margin = ctk.CTkEntry(g, width=120)
+        self.rescue_margin.insert(0, str(cfg.get("matcher_rescue_margin",
+                                                 spender.RESCUE_MARGIN_DEFAULT)))
+        self.rescue_margin.grid(row=5, column=1, sticky="w", pady=4)
+        ctk.CTkLabel(g, text="runner-up gap that lets a mid-score match skip OCR",
+                     font=theme.FONT_SMALL, text_color="gray").grid(
+            row=5, column=2, sticky="w", padx=theme.PAD)
 
         # --- match pool ---
         # comparison-pool narrowing: only score the library icons the priority list cares about, so
@@ -318,11 +352,15 @@ class SettingsScreen(ctk.CTkFrame):
                                   ("entity_settle_s", self.entity_settle, "entity smoke wait"),
                                   ("ocr_hover_s", self.hover, "OCR tooltip wait"),
                                   ("advance_s", self.advance, "level transition wait"),
-                                  ("prestige_wait_s", self.prestige_wait, "prestige animation wait")):
+                                  ("prestige_wait_s", self.prestige_wait, "prestige animation wait"),
+                                  ("presence_thresh", self.presence, "presence threshold"),
+                                  ("matcher_rescue_min", self.rescue_min, "matcher rescue min score"),
+                                  ("matcher_rescue_margin", self.rescue_margin,
+                                   "matcher rescue margin")):
             try:
                 cfg[key] = float(entry.get())
             except ValueError:
-                messagebox.showerror("invalid value", f"{label} must be a number (seconds).")
+                messagebox.showerror("invalid value", f"{label} must be a number.")
                 return
         # the stop thresholds are whole numbers, 0 = off
         for key, entry, label in (("stop_bp_threshold", self.stop_bp, "bloodpoints remaining"),

@@ -26,9 +26,19 @@ from ctypes import wintypes
 from pathlib import Path
 
 from . import capture, detect, input_control, ocr, paths
-from .node import Node, build_pool_mask, tier_rules, tier_is_ordered
+from .node import (
+    CNN_RESCUE_MARGIN, CNN_RESCUE_MIN, Node, build_pool_mask, set_rescue_gate, tier_is_ordered,
+    tier_rules,
+)
 from .resolution import Resolution
 from .sim import sim_source
+
+# pristine defaults for the tunable detection gates, frozen at import BEFORE any runtime override
+# mutates the module globals (set_presence_thresh / set_rescue_gate), so a config missing a knob
+# always falls back to the calibrated value and never to a previous run's override.
+PRESENCE_THRESH_DEFAULT = detect.PRESENCE_THRESH
+RESCUE_MIN_DEFAULT = CNN_RESCUE_MIN
+RESCUE_MARGIN_DEFAULT = CNN_RESCUE_MARGIN
 
 KILL_KEY = "f8"      # dedicated always-stop panic hotkey, only ever stops, never resumes
 START_KEY = "f7"     # start/pause toggle, idle -> running -> paused -> running
@@ -102,6 +112,11 @@ class Switch:
         self.kill_key = kill_key
         self._running = threading.Event()   # set = running, clear = idle/paused
         self._killed = threading.Event()    # set = hard stop latched, terminal
+        # fired (from the listener thread) whenever the start hotkey lands, on top of the toggle.
+        # lets the ui treat the key as a start BUTTON too: with no run thread alive the toggle alone
+        # flips an event nobody is reading, so the ui watches this to spawn a fresh run instead —
+        # the whole point being you can start from inside the game without alt-tabbing back.
+        self.on_start = None
 
     def arm(self):
         # RegisterHotKey binds the hotkey to the calling thread, so register + pump in the
@@ -120,6 +135,9 @@ class Switch:
             if msg.message == _WM_HOTKEY:
                 if msg.wParam == start_id:
                     self.toggle()
+                    cb = self.on_start
+                    if cb is not None:
+                        cb()   # must stay thread-safe: this is the listener thread, not the ui's
                 elif msg.wParam == kill_id:
                     self.kill()
 
@@ -250,10 +268,18 @@ def load_config(path=None):
     # call, not ours.
     cfg.setdefault("entity_race", False)
     cfg.setdefault("entity_settle_s", ENTITY_SETTLE_S)   # smoke-render wait before the state re-read
+    # detection tuning gates surfaced in the settings ui, so they can be re-tuned on another user's
+    # machine without shipping a build (run() pushes them into detect/node before the first scan).
+    cfg.setdefault("presence_thresh", PRESENCE_THRESH_DEFAULT)
+    cfg.setdefault("matcher_rescue_min", RESCUE_MIN_DEFAULT)
+    cfg.setdefault("matcher_rescue_margin", RESCUE_MARGIN_DEFAULT)
     # ui-only display prefs (the engine ignores them); kept here so the single serializer round-trips
     # them and they default sanely on an older file. see ui.widgets.tooltip + ui.library.filter.
     cfg.setdefault("show_tooltips", True)
-    cfg.setdefault("hide_unavailable", True)
+    # library reveal filters: event glyphs show by default, retired/power ("n/a") rows stay hidden.
+    # (supersedes the single hide_unavailable flag, which lumped both behind one checkbox.)
+    cfg.setdefault("show_event", True)
+    cfg.setdefault("show_na", False)
     # accessibility text/widget scale applied app-wide via ctk.set_widget_scaling. 1.0 = default size.
     cfg.setdefault("ui_scale", 1.0)
     return cfg
@@ -711,11 +737,14 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
     dry-run (logs intent, sends no input) whenever click=False; main folds the config dry_run
     default plus the --dry-run / --live / --sim flags into that one flag.
     debug adds the per-scan ocr summary + per-node/per-buy provenance logging (see --debug).
-    frame_sink, if given, is called each scan (only while debug and a live frame exist) with an
-    annotated bgr frame (detect.draw_detections), so a caller like the ui's debug view can show
-    what the loop is seeing without popping a blocking window.
+    frame_sink, if given, is called each scan (only while debug and a live frame exist) with
+    (annotated_bgr, raw_bgr) — the detect.draw_detections overlay plus the clean grab it was drawn
+    from — so a caller like the ui's debug view can show what the loop is seeing (and save both).
     status_sink, if given, is called each live scan with {"prestige","level","bp"} (any may be None),
     so the debug view can show the ocr'd values to sanity-check the threshold/prestige reads.
+
+    every live run also stops itself when the ocr'd bloodpoints can't cover the next pick (or, at
+    the level boundary, the cheapest node left), instead of dead-clicking a web it can't afford.
 
     optional stops and prestige (all live-only, off unless configured):
       stop_bp_threshold  spend down toward a bp floor; on the final level we can't fully afford, buy
@@ -750,6 +779,11 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
     hover_s = config.get("ocr_hover_s", ocr.HOVER_DELAY_S)  # tooltip fade-in wait before an ocr read
     consume = getattr(source, "consume", None)     # stateful-source hooks, absent on live_source
     advance = getattr(source, "advance", None)
+    # push the tunable detection gates into their modules before the first scan: detect/node read
+    # module globals, so a value tuned in the settings ui wouldn't reach them otherwise.
+    detect.set_presence_thresh(config.get("presence_thresh", PRESENCE_THRESH_DEFAULT))
+    set_rescue_gate(config.get("matcher_rescue_min", RESCUE_MIN_DEFAULT),
+                    config.get("matcher_rescue_margin", RESCUE_MARGIN_DEFAULT))
     # log the ocr'd status each scan when debugging a threshold/prestige feature, to sanity-check it.
     report_status = debug and (bp_floor or stop_prestige or stop_level or auto_prestige)
     last_center = None   # full-frame (x,y) web center from the last filled scan; the prestige star sits here
@@ -779,7 +813,10 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
             level = ocr.read_bloodweb_level(frame)   # always: cheap, and gates the level-50 prestige/stop
             if stop_prestige or report_status:
                 prestige = ocr.read_prestige_level(frame)
-            if bp_floor or report_status:
+            if bp_floor or report_status or not dry_run:
+                # any live run reads bp too (not just the bp-floor stop): it feeds the
+                # insufficient-bloodpoints stop below, so a run out of points parks itself
+                # instead of re-clicking a web it can't afford forever.
                 bp = ocr.read_bp(frame)
             if report_status:
                 if status_sink is not None:
@@ -847,7 +884,7 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
         if debug and frame is not None:
             annotated = detect.draw_detections(frame, nodes)
             if frame_sink is not None:
-                frame_sink(annotated)
+                frame_sink(annotated, frame)
             _save_scan_frames(frame, annotated)
 
         # on the final level the budget can't cover the whole web, so buy priorities up to the budget
@@ -856,7 +893,11 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
         est_spent = 0
 
         # click every priority match on this snapshot, high to low, skipping spots already clicked.
+        # bp_now tracks the freshest ocr bloodpoint read (re-read off every post-buy grab below),
+        # for the insufficient-bloodpoints stop; None whenever the ocr couldn't read it.
         spent = []
+        bp_now = bp
+        out_of_bp = None   # the pick we couldn't afford, so the stop line can name it
         while switch.running and not switch.killed:
             candidates = [n for n in nodes if not _recently_bought(n, spent)]
             choice = choose_next(candidates, config)
@@ -866,6 +907,9 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
                 break
             if final_level and est_spent + _node_cost(choice, cost_table) > budget:
                 break                     # can't afford more priorities within the bp floor
+            if not dry_run and bp_now is not None and bp_now < _node_cost(choice, cost_table):
+                out_of_bp = choice        # can't afford the next pick: stop below, don't dead-click
+                break
             est_spent += _node_cost(choice, cost_table)
             # margin + runner-up on the buy line are the followup lever;
             # a confident buy with a tiny margin vs a plausible runner-up flags a possible mispick.
@@ -905,18 +949,29 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
             # the ring is only half drawn.
             if not dry_run and frame is not None and not switch.killed:
                 frame, region = capture.grab_with_region(region)
+                new_bp = ocr.read_bp(frame)   # keep the insufficient-bp stop current as we spend
+                if new_bp is not None:
+                    bp_now = new_bp
                 delta = refresh_states(nodes, frame)
                 if delta and debug:
                     # the burst size is the interesting bit: the entity takes 1 node some buys and 6
                     # or 7 others, so log it to build a picture of what the risk actually looks like.
                     print("[state] " + ", ".join(f"+{v} {k}" for k, v in sorted(delta.items())))
                     if frame_sink is not None:   # repaint so the debug view shows what just died
-                        frame_sink(detect.draw_detections(frame, nodes))
+                        frame_sink(detect.draw_detections(frame, nodes), frame)
 
         if switch.killed:                 # killed: bail before the auto-spend
             break
         if not switch.running:            # paused mid-web: idle without auto-spending, resume rescans
             continue
+
+        # out of bloodpoints mid-web: log both sides of the comparison (the ocr read and what the
+        # next pick would have cost) and stop, rather than dead-clicking nodes the game won't sell.
+        if out_of_bp is not None:
+            print(f"stop: insufficient bloodpoints, can no longer spend "
+                  f"(ocr bp {bp_now} < ~{_node_cost(out_of_bp, cost_table)} for next pick "
+                  f"{out_of_bp.name!r})")
+            break
 
         # final bp-floor level: we bought the priorities we could afford, now stop rather than
         # auto-spending the rest of the web (which would spend past the floor). leaves ~budget unspent.
@@ -926,6 +981,16 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
                   + (f" (est ~{left} bp left)" if left is not None else "")
                   + ", stopping before auto-spend")
             break
+
+        # same stop at the level boundary: if we can't afford even the cheapest remaining node, the
+        # center auto-spend can't buy anything either, and every rescan would land right back here.
+        if not dry_run and bp_now is not None:
+            cheapest = min((_node_cost(n, cost_table) for n in nodes
+                            if not n.is_center and not n.taken), default=None)
+            if cheapest is not None and bp_now < cheapest:
+                print(f"stop: insufficient bloodpoints, can no longer spend "
+                      f"(ocr bp {bp_now} < ~{cheapest} for the cheapest node left on the web)")
+                break
 
         # priorities exhausted: hand the rest of the web to dbd's center auto-spend, then advance.
         if dry_run:

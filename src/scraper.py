@@ -25,7 +25,8 @@ dedup -> write. just `python -m src.scraper`, or `--dry-run` to see what would c
 writes:
   data/icons/<category>/<key>.png   the raw sprite
   data/icons_index.json             one row per icon: key, name, aliases, category, rarity,
-                                    obtainable, role, owner, side, desc, file, phash, url
+                                    obtainable, role, owner, side, killer, desc, effect, file,
+                                    phash, url
 
 `aliases` are the other names a row answers to: the wiki's redirects to its article (old licensed
 names and the shorthand people type -- "Dying Light", "STBFL", "BBQ") plus the name its filename
@@ -52,6 +53,7 @@ hashes from the cached pngs, no re-download needed.
 from __future__ import annotations
 
 import argparse
+import html
 import io
 import json
 import os
@@ -69,7 +71,7 @@ from tqdm import tqdm
 from urllib3.util.retry import Retry
 
 from . import paths
-from .node import dedup_index_rows, normalize_name
+from .node import dedup_index_rows, normalize_name, row_names
 
 API = "https://deadbydaylight.wiki.gg/api.php"
 
@@ -135,9 +137,10 @@ DEFAULT_INDEX = paths.cache_dir() / "icons_index.json"
 
 # rarity comes from wiki categories: pages are tagged "<rarity> Items/Add-ons/Offerings".
 # only reliable source, since allimages carries no rarity and there are no cargo tables.
-# ~100 reworked/top-tier icons sit in a "Visceral" bucket with no rarity tag, so they stay
-# null. fine, since rarity is just a soft cross-check; the disk color is the live read.
-RARITY_WORDS = ["Common", "Uncommon", "Rare", "Very Rare", "Ultra Rare"]
+RARITY_WORDS = ["Common", "Uncommon", "Rare", "Very Rare", "Ultra Rare", "Visceral"]
+# the wiki renamed the top tier "Visceral"; in-game it's still the iridescent pink disk, so it maps
+# onto our "ultra rare" (leaving it null made ~100 iri add-ons show as 'any rarity' in the ui).
+RARITY_ALIASES = {"visceral": "ultra rare"}
 RARITY_TYPES = {"item": "Items", "addon": "Add-ons", "offering": "Offerings"}
 
 # obtainability: which scraped glyphs can still turn up in a current bloodweb. three states:
@@ -315,7 +318,9 @@ def _index_one(session, url, key, name, category, rarity, obtainable, role,
         "role": role,                        # 'killer' | 'survivor' | None (see _role)
         "owner": None,                       # add-on's item type / killer power, filled by fill_sources
         "side": None,                        # 'survivor' | 'killer' | None, filled by fill_sources
+        "killer": None,                      # killer add-on's wielder ('The Trapper'), filled by fill_killers
         "desc": "",                          # wiki lead sentence, filled by fill_descriptions
+        "effect": "",                        # rendered gameplay text, filled by fill_effects
         "aliases": [],                       # other names it answers to, filled by fill_aliases
         # relative to the index file so the library stays portable; detect resolves it
         # against index_path.parent
@@ -418,6 +423,21 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
     _p("fetching item sources")
     fill_sources(index, fetch_survivor_item_types(session))
 
+    # killer display names for the ui's per-killer filter, joined off the wiki's lua data modules;
+    # soft: an empty map (fetch/parse trouble) just leaves them null (see fetch_killer_map).
+    _p("fetching killer names")
+    fill_killers(index, fetch_killer_map(session))
+
+    # rendered gameplay text for the ui tooltips, from the same modules (the public api can't reach
+    # it, see the renderer's note); soft: a failed render just leaves the lead sentence.
+    _p("fetching effect texts")
+    fill_effects(index, fetch_effect_texts(session))
+
+    # nulls-only rarity backfill off the loadout module (the category sweep stays authoritative);
+    # mainly catches event-tier glyphs the wiki categories don't carry. soft like its siblings.
+    _p("backfilling rarities")
+    fill_rarities(index, fetch_module_rarities(session))
+
     # the other names each row answers to (wiki redirects + the name its filename would have given
     # it), so a rename never strands an existing priority rule.
     _p("fetching aliases")
@@ -481,7 +501,8 @@ def fetch_rarity_map(session):
     for our_cat, type_word in RARITY_TYPES.items():
         for rar in RARITY_WORDS:
             for title in category_members(session, f"{rar} {type_word}"):
-                rmap[our_cat][_norm(title)] = rar.lower()
+                r = rar.lower()
+                rmap[our_cat][_norm(title)] = RARITY_ALIASES.get(r, r)
     return rmap
 
 
@@ -913,6 +934,440 @@ def fill_sources(rows, surv_types):
     for r in rows:
         r["owner"] = _owner(r["category"], r.get("desc"))
         r["side"] = _side(r["category"], r["owner"], r.get("role"), surv_types)
+
+
+# killer names for the ui's per-killer filter. nowhere public carries them: power pages are
+# redirects or bare lua invocations (no extracts, which is also why power rows have no desc), and
+# the killer articles render everything through {{#Invoke:Killers|...}}. what those all render FROM
+# is two lua data modules, fetched here as raw page source: Module:Datatable holds the killers
+# table ({id = 1, name = "Trapper", ...}) and Module:Datatable/Loadout holds p.powers
+# (["Bear Trap"] = {killer = 1, ...}). being the render source they're current the moment a chapter
+# ships -- but they are wiki INTERNALS, not a public api, so the parse is lenient and fails SOFT:
+# an empty map leaves `killer` null everywhere and the ui falls back to its own owner table.
+
+def _lua_balanced(txt, start):
+    """the source slice of one balanced {...} starting at txt[start] == '{'.
+    string- and comment-aware, so a brace inside "flavor text" or after a -- comment can't
+    unbalance the scan."""
+    depth, j, n = 0, start, len(txt)
+    while j < n:
+        c = txt[j]
+        if c in "\"'":
+            q = c
+            j += 1
+            while j < n and txt[j] != q:
+                j += 2 if txt[j] == "\\" else 1
+        elif txt.startswith("--", j):
+            j = txt.find("\n", j)
+            if j < 0:
+                return ""
+        elif c == "{":
+            depth += 1
+        elif c == "}":
+            depth -= 1
+            if depth == 0:
+                return txt[start:j + 1]
+        j += 1
+    return ""
+
+
+def _lua_table(txt, header_re):
+    """the brace-balanced source slice of one lua table, opening { through its matching }."""
+    m = re.search(header_re, txt)
+    if not m:
+        return ""
+    return _lua_balanced(txt, txt.index("{", m.start()))
+
+
+def _module_sources(session, *titles):
+    """raw page source of wiki pages (used for the Module: lua data pages), {title: text}."""
+    r = session.get(API, params={
+        "action": "query", "prop": "revisions", "rvprop": "content", "rvslots": "main",
+        "titles": "|".join(titles), "format": "json", "formatversion": "2",
+    }, timeout=30)
+    r.raise_for_status()
+    return {p["title"]: p["revisions"][0]["slots"]["main"]["content"]
+            for p in r.json()["query"]["pages"] if p.get("revisions")}
+
+
+def fetch_killer_map(session):
+    """{owner key (folded power name): killer display name}, joined off the lua data modules:
+    Loadout's power -> killer id, Datatable's id -> name ('Trapper' -> 'The Trapper').
+    returns {} on any fetch/parse trouble so a module refactor can never kill a scrape."""
+    try:
+        src = _module_sources(session, "Module:Datatable", "Module:Datatable/Loadout")
+        killers = _lua_table(src.get("Module:Datatable", ""), r"\bkillers\s*=\s*\{")
+        powers = _lua_table(src.get("Module:Datatable/Loadout", ""), r"p\.powers\s*=\s*\{")
+        by_id = {int(kid): f"The {name}" for kid, name in
+                 re.findall(r'\{\s*id\s*=\s*(\d+)\s*,\s*name\s*=\s*"([^"]+)"', killers)}
+        out = {}
+        # one chunk per ["Power Name"] = {...} entry (nested tables never contain '["', so the
+        # split can't tear an entry); the killer id sits somewhere inside the chunk.
+        for chunk in re.split(r'\[\s*"', powers)[1:]:
+            name, _, body = chunk.partition('"')
+            m = re.search(r"\bkiller\s*=\s*(\d+)", body)
+            if m and int(m.group(1)) in by_id:
+                out[_norm(name)] = by_id[int(m.group(1))]
+        return out
+    except Exception:
+        return {}   # soft by design, see the module-internals note above
+
+
+def fill_killers(rows, killer_map):
+    """populate killer-side add-on rows' `killer` display name from their owner key, in place.
+    run after fill_sources (owner comes from the desc). survivor item families and rows whose
+    owner didn't parse stay null; the ui keeps its own fallback table for those and for indexes
+    scraped before this field existed."""
+    for r in rows:
+        if r.get("category") == "addon" and r.get("side") == "killer":
+            r["killer"] = killer_map.get(r.get("owner"))
+
+
+# effect text for the ui tooltips. the real gameplay text is NOT reachable through the public api
+# (article bodies are lua invocations; TextExtracts only yields the lead sentence) -- but its render
+# SOURCE is: Module:Datatable/Loadout/Descriptions holds every description as a lua string-concat
+# expression ('"flavor." .. list(b("Increases") .. " speed by " .. clror("#effect") .. dot)'),
+# with #field placeholders resolved from the matching Module:Datatable/Loadout entry and shared
+# strings/icon names in Module:Strings. what follows is a tiny recursive-descent renderer for
+# exactly that grammar (strings, dotted names, calls, .. concat) with plain-text stand-ins for the
+# markup helpers. NO lua and NO eval on purpose: wiki content must never become executed code.
+# everything fails soft, per entry and as a whole: an entry that won't render (or still holds an
+# unresolved #placeholder) just ships no effect text and its tooltip keeps the lead sentence.
+
+DESC_TABLES = {              # lua table in the Descriptions module -> our category
+    "itemDescriptions": "item",
+    "addonDescriptions": "addon",
+    "offeringDescriptions": "offering",
+    "perkDescriptions": "perk",
+}
+LOADOUT_TABLES = {           # lua table in the Loadout module holding each category's #fields
+    "item": r"p\.items\s*=\s*\{",
+    "addon": r"p\.addons\s*=\s*\{",
+    "offering": r"p\.offerings\s*=\s*\{",
+    "perk": r"p\.perks\s*=\s*\{",
+}
+
+
+def _lua_tokens(src):
+    """tokens of a lua concat expression: ('str', text) literals, ('name', id), punctuation, '..'."""
+    toks, i, n = [], 0, len(src)
+    esc = {"n": "\n", "t": "\t"}
+    while i < n:
+        c = src[i]
+        if c.isspace():
+            i += 1
+        elif c in "\"'":
+            j, buf = i + 1, []
+            while j < n and src[j] != c:
+                if src[j] == "\\" and j + 1 < n:
+                    buf.append(esc.get(src[j + 1], src[j + 1]))
+                    j += 2
+                else:
+                    buf.append(src[j])
+                    j += 1
+            toks.append(("str", "".join(buf)))
+            i = j + 1
+        elif src.startswith("..", i):
+            toks.append(("op", ".."))
+            i += 2
+        elif src.startswith("--", i):        # comment to end of line
+            j = src.find("\n", i)
+            i = n if j < 0 else j
+        elif c.isalpha() or c == "_":
+            j = i
+            while j < n and (src[j].isalnum() or src[j] == "_"):
+                j += 1
+            toks.append(("name", src[i:j]))
+            i = j
+        elif c.isdigit():
+            j = i
+            while j < n and (src[j].isdigit() or src[j] == "."):
+                j += 1
+            toks.append(("str", src[i:j]))   # a bare number is just text once concatenated
+            i = j
+        elif c in "().,":
+            toks.append((c, c))
+            i += 1
+        else:
+            i += 1                           # stray lua we don't model contributes nothing
+    return toks
+
+
+class _DescRenderer:
+    """render one tokenized description expression to plain text.
+    grammar: concat := term ('..' term)*; term := STRING | dotted-name [ '(' concat, ... ')' ].
+    names/calls resolve through plain-text stand-ins for the wiki's markup helpers below."""
+
+    CONSTS = {"br": "\n", "nl": "\n", "nlp": "\n\n", "dot": ".", "colon": ":", "comma": ",",
+              "semicolon": ";", "space": " "}
+    DROP_CALLS = {"img", "aimg", "pwrimg"}           # imagery renders no text
+    LAST_ARG = {"clr", "bclr", "effects"}            # (color/kind..., text) -> the text
+
+    def __init__(self, ils, shared):
+        self.ils = ils          # icon display strings (Module:Strings), key -> "Exit Gates"
+        self.shared = shared    # pre-rendered loadoutStrings entries
+
+    def render(self, src):
+        self._toks, self._i = _lua_tokens(src), 0
+        return self._concat()
+
+    def _peek(self):
+        return self._toks[self._i] if self._i < len(self._toks) else (None, None)
+
+    def _concat(self):
+        parts = [self._term()]
+        while self._peek() == ("op", ".."):
+            self._i += 1
+            parts.append(self._term())
+        return "".join(parts)
+
+    def _term(self):
+        kind, val = self._peek()
+        if kind == "str":
+            self._i += 1
+            return val
+        if kind == "name":
+            self._i += 1
+            path = [val]
+            while self._peek() == (".", "."):
+                self._i += 1
+                k, v = self._peek()
+                if k != "name":
+                    break
+                path.append(v)
+                self._i += 1
+            if self._peek() == ("(", "("):
+                self._i += 1
+                args = []
+                if self._peek() != (")", ")"):
+                    args.append(self._concat())
+                    while self._peek() == (",", ","):
+                        self._i += 1
+                        args.append(self._concat())
+                if self._peek() == (")", ")"):
+                    self._i += 1
+                return self._call(path[-1].lower(), args)
+            return self._value(path)
+        self._i += 1                          # unexpected token: skip, contribute nothing
+        return ""
+
+    def _value(self, path):
+        if path[0] == "ils" and len(path) == 2:
+            # icon-link strings; a key the strings module doesn't carry falls back to its own
+            # un-camelcased name (exitGates -> 'Exit Gates'), so text never loses its noun
+            got = self.ils.get(path[1])
+            if got is None:
+                got = prettify(path[1])
+                got = got[:1].upper() + got[1:]
+            return got
+        if path[0] == "loadoutStrings" and len(path) == 2:
+            return self.shared.get(path[1], "")
+        if len(path) == 1:
+            return self.CONSTS.get(path[0], "")
+        return ""                             # cstr.empty and friends
+
+    def _call(self, name, args):
+        if name in self.DROP_CALLS:
+            return ""
+        if name == "list":
+            items = [a.strip() for a in args if a.strip()]
+            return ("\n" + "\n".join("• " + it for it in items) + "\n") if items else ""
+        if name == "quote":
+            return "\n“" + "".join(args) + "”"
+        if name in self.LAST_ARG and args:
+            return args[-1]
+        return "".join(args)                  # b/i/u/link/iconLink/ibil/clro/clror/...: text through
+
+
+def _keyed_entries(table_src):
+    """{display name: balanced {...} body source} for a lua table keyed ["Like This"] = {...}."""
+    out = {}
+    for m in re.finditer(r'\[\s*"((?:[^"\\]|\\.)*)"\s*\]\s*=\s*\{', table_src):
+        body = _lua_balanced(table_src, m.end() - 1)
+        if body:
+            out[m.group(1).replace('\\"', '"')] = body
+    return out
+
+
+def _named_entries(table_src):
+    """{bare_name: expression source} for a lua table keyed name = <expr> (loadoutStrings)."""
+    inner = table_src[1:-1] if table_src else ""
+    marks = list(re.finditer(r"^\s*([A-Za-z_]\w*)\s*=", inner, re.M))
+    return {m.group(1): inner[m.end():(marks[k + 1].start() if k + 1 < len(marks) else len(inner))]
+                        .rstrip().rstrip(",")
+            for k, m in enumerate(marks)}
+
+
+def _entry_fields(body):
+    """the placeholder-resolvable fields of one loadout entry, for #field / #field(n) / #pl(n)
+    substitution: scalar strings/numbers, table-valued fields (aura = {"4 metres", ...}), the
+    per-tier values list, and its unit ids."""
+    fields = dict(re.findall(r'(\w+)\s*=\s*"([^"]*)"', body))
+    fields.update({k: v for k, v in re.findall(r"(\w+)\s*=\s*(-?[\d.]+)", body)
+                   if k not in fields})
+    tables, values, units = {}, [], []
+    for m in re.finditer(r"(\w+)\s*=\s*\{", body):
+        key = m.group(1)
+        inner = _lua_balanced(body, m.end() - 1)[1:-1]
+        items = [x.strip().strip('"') for x in inner.split(",") if x.strip()]
+        if key == "values":
+            # nested groups ({{..},{..}}) split as written; a flat list is one group here and is
+            # re-chunked against the units count at resolve time (sloppy-butcher style)
+            groups = re.findall(r"\{([^{}]*)\}", inner)
+            values = ([[x.strip().strip('"') for x in g.split(",") if x.strip()] for g in groups]
+                      if groups else [items])
+        elif key == "units":
+            units = items
+        elif key != "tags":                   # tags are search metadata, never a placeholder
+            tables[key] = items
+    return fields, tables, values, units
+
+
+def _resolve_placeholders(text, name, fields, tables, values, units, unit_names):
+    """substitute #pn / #name (the thing's own name), #pl(n) (per-tier values + that slot's unit),
+    #field(n) (table-valued fields), and #field (scalars). returns None when any #placeholder
+    survives, so a half-rendered description is dropped rather than shown."""
+    groups = values
+    if len(groups) == 1 and len(units) > 1 and len(groups[0]) % len(units) == 0:
+        # flat values with several units = the groups laid end to end (units={1,4},
+        # values={70,80,90,50,75,100} -> "70/80/90 seconds" and "50/75/100 %")
+        per = len(groups[0]) // len(units)
+        groups = [groups[0][i * per:(i + 1) * per] for i in range(len(units))]
+
+    def _indexed(m):
+        key, k = m.group(1), int(m.group(2)) - 1
+        if key == "pl":
+            if k < len(groups):
+                unit = unit_names.get(units[k], "") if k < len(units) else ""
+                return f"{'/'.join(groups[k])} {unit}".strip()
+        elif key in tables and k < len(tables[key]):
+            return tables[key][k]
+        return m.group(0)                     # unresolved, caught by the survivor check below
+
+    text = text.replace("#pn", name).replace("#name", name)
+    text = re.sub(r"#(\w+)\((\d+)\)", _indexed, text)
+    text = re.sub(r"#(\w+)", lambda m: fields.get(m.group(1), m.group(0)), text)
+    return None if re.search(r"#[A-Za-z]", text) else text
+
+
+def _tidy_desc(text):
+    """whitespace/markup cleanup of a rendered description into tooltip-ready plain text."""
+    text = html.unescape(re.sub(r"<[^>]+>", "", text))
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" +([.,:;])", r"\1", text)
+    text = "\n".join(line.strip() for line in text.split("\n"))
+    return re.sub(r"\n{3,}", "\n\n", text).strip()
+
+
+def render_effect_texts(desc_src, loadout_src, strings_src):
+    """{category: {folded name: plain-text effect}} rendered from the three modules' sources.
+    pure so it can be exercised offline against saved module dumps; fetch_effect_texts wraps it."""
+    ils = dict(re.findall(r'(\w+)\s*=\s*"((?:[^"\\]|\\.)*)"',
+                          _lua_table(strings_src, r"\bils\s*=\s*\{")))
+    # shared strings first: they're concat expressions themselves, rendered with an empty shared
+    # map (they reference ils, never each other)
+    seed = _DescRenderer(ils, {})
+    shared = {}
+    for key, expr in _named_entries(_lua_table(desc_src, r"loadoutStrings\s*=\s*\{")).items():
+        try:
+            shared[key] = seed.render(expr)
+        except Exception:
+            pass
+    renderer = _DescRenderer(ils, shared)
+    unit_names = {uid: html.unescape(uval) for uid, uval in
+                  re.findall(r'\{\s*id\s*=\s*(\d+)\s*,\s*value\s*=\s*"([^"]*)"', loadout_src)}
+
+    out = {}
+    for lua_table, category in DESC_TABLES.items():
+        entries = _keyed_entries(_lua_table(desc_src, rf"{lua_table}\s*=\s*\{{"))
+        loadout = _keyed_entries(_lua_table(loadout_src, LOADOUT_TABLES[category]))
+        rendered = {}
+        for name, body in entries.items():
+            dm = re.search(r"\bdesc\s*=", body)
+            if not dm:
+                continue
+            try:
+                fields, tables, values, units = _entry_fields(loadout.get(name, ""))
+                text = renderer.render(body[dm.end():-1])
+                text = _resolve_placeholders(text, name, fields, tables, values, units, unit_names)
+                if text:
+                    rendered[_norm(name)] = _tidy_desc(text)
+            except Exception:
+                continue                      # one stubborn entry never blocks the rest
+        out[category] = rendered
+    return out
+
+
+def fetch_effect_texts(session):
+    """render every item/add-on/offering/perk effect text off the wiki's lua data modules.
+    returns {} on any fetch/parse trouble so a module refactor can never kill a scrape."""
+    try:
+        src = _module_sources(session, "Module:Datatable/Loadout/Descriptions",
+                              "Module:Datatable/Loadout", "Module:Strings")
+        return render_effect_texts(src["Module:Datatable/Loadout/Descriptions"],
+                                   src["Module:Datatable/Loadout"], src["Module:Strings"])
+    except Exception:
+        return {}   # soft by design, see the module-internals note above
+
+
+def fill_effects(rows, effect_map):
+    """populate each row's `effect` (rendered gameplay text, shown under the lead sentence in the
+    ui tooltip) in place, joined by category + any name the row answers to (aliases included, so
+    an offering the module keys by its old event name still hits). rows the modules don't describe
+    (powers, brand-new content, failed renders) keep '' and their tooltip stays the lead sentence."""
+    for r in rows:
+        cat_map = effect_map.get(r["category"]) or {}
+        r["effect"] = next((cat_map[n] for n in row_names(r) if n in cat_map), "")
+
+
+# module rarity id -> our tier, measured empirically against the ~1250 rows carrying both reads
+# (99.4% diagonal agreement). 0 (unused/unreleased content) and 11 (the game's "Special" tier:
+# chest/power items like the Vaccine or EMP, never bloodweb nodes) are deliberately absent --
+# null is the right answer for those.
+MODULE_RARITIES = {"1": "common", "2": "uncommon", "3": "rare", "4": "very rare",
+                   "5": "ultra rare", "8": "event"}
+
+
+def parse_module_rarities(loadout_src):
+    """{category: {folded name: rarity string}} off the Loadout entries' rarity = <n> ids."""
+    out = {}
+    for category, header in LOADOUT_TABLES.items():
+        cat = {}
+        for name, body in _keyed_entries(_lua_table(loadout_src, header)).items():
+            m = re.search(r"\brarity\s*=\s*(\d+)", body)
+            rar = MODULE_RARITIES.get(m.group(1)) if m else None
+            if rar:
+                cat[_norm(name)] = rar
+        out[category] = cat
+    return out
+
+
+def fetch_module_rarities(session):
+    """rarity backfill map off the Loadout module; {} on any trouble (soft, like its siblings).
+    distinct from fetch_rarity_map (the category sweep): that one stays the primary source."""
+    try:
+        return parse_module_rarities(
+            _module_sources(session, "Module:Datatable/Loadout")["Module:Datatable/Loadout"])
+    except Exception:
+        return {}
+
+
+def fill_rarities(rows, module_rarities):
+    """backfill NULL rarities only, in place. the category tags stay authoritative where they
+    exist: the wiki's two sources disagree on a handful of rows, and the categories are what the
+    rest of the pipeline was calibrated against. in practice this catches the event-tier glyphs
+    the categories don't carry, so those rows also pick up the matching 'event' obtainability
+    (mirroring _obtainable's fallback, which ran before this rarity existed)."""
+    for r in rows:
+        if r.get("rarity") is not None:
+            continue
+        cat_map = module_rarities.get(r["category"]) or {}
+        rar = next((cat_map[n] for n in row_names(r) if n in cat_map), None)
+        if rar is None:
+            continue
+        r["rarity"] = rar
+        if rar == "event" and r.get("obtainable") == "normal":
+            r["obtainable"] = "event"
 
 
 def fetch_page_titles(session):

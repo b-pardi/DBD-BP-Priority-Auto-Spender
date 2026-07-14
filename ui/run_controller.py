@@ -43,6 +43,12 @@ class RunController:
             start_key=config.get("start_key", spender.START_KEY),
             kill_key=config.get("kill_key", spender.KILL_KEY),
         ).arm()
+        # the start hotkey doubles as a start button: with no run thread alive its toggle flips an
+        # event nobody reads, so the listener also sets this and the run screen's poll (main thread,
+        # the only place tk is safe) spawns the run. an Event, not a call, because the listener is
+        # a background thread.
+        self.hotkey_start = threading.Event()
+        self.switch.on_start = self.hotkey_start.set
         self.thread = None
 
     def _build_source(self, config, sim):
@@ -96,6 +102,10 @@ class RunController:
         except Exception as e:
             self.log_queue.put(f"run error: {type(e).__name__}: {e}")
         finally:
+            # latch the kill whenever the loop exits on its own (bp stop, goal stop, error): the
+            # switch could otherwise still read 'running' with no thread behind it, which showed
+            # "Pause" on a dead run and would make the next start hotkey look like a pause.
+            self.switch.kill()
             sys.stdout = old
             self.log_queue.put("[run stopped]")
 

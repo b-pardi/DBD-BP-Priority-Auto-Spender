@@ -22,6 +22,8 @@ edits go through this widget's methods; it copies on set_tiers so nothing is mut
 screen saves.
 """
 
+import tkinter as tk
+
 import customtkinter as ctk
 
 from src import spender
@@ -60,6 +62,14 @@ class TierList(ctk.CTkScrollableFrame):
         self.selected = 0
         self._boxes = []             # _TierBox, aligned to self.tiers
         self._drag_target = None     # index tinted by the current drag, so we only retint on change
+        self._drop_pos = None        # (tier idx, insert idx) the drop bar last showed
+        # the drop-position bar: one thin bright strip place()d between the two chips a drop at the
+        # cursor would land between, so a drag says exactly where the rule will go, not just which
+        # tier. built once and retargeted across tier frames via place(in_=...).
+        # a BARE tk.Frame, not a CTkFrame: ctk's place() hard-raises ValueError on a width/height
+        # kwarg, and it widget-scales x/y -- but we place from winfo_* geometry, which is already in
+        # real pixels. as a CTkFrame this threw on every mouse move and the bar simply never showed.
+        self._drop_bar = tk.Frame(self, height=3, bg=DROP_COLOR, bd=0, highlightthickness=0)
 
         # permanent chrome: built once, never torn down, so the tier boxes pack between them.
         self.blurb = ctk.CTkLabel(
@@ -203,9 +213,12 @@ class TierList(ctk.CTkScrollableFrame):
             self._changed()
 
     def _toggle_rarity(self, rule):
-        """flip an item rule between its pinned rarity and 'any rarity of this item'."""
+        """flip an item rule between its pinned rarity and 'any rarity of this item'.
+        unpinning writes an EXPLICIT null rather than dropping the key: an absent key means 'the
+        library didn't know the rarity yet' and gets re-pinned by the load-time reconcile
+        (config_io.reconcile_rule_rarities); null means the user chose any, and stays chosen."""
         if rule.get("rarity"):
-            rule.pop("rarity", None)
+            rule["rarity"] = None
         else:
             rar = self.library.lookup_rarity(rule.get("name", ""))
             if rar:
@@ -240,17 +253,50 @@ class TierList(ctk.CTkScrollableFrame):
         return len(self._boxes[ti].chips)
 
     def drag_highlight(self, x_root, y_root):
-        """tint the tier under the cursor while a drag hovers it; x_root None clears back to normal.
-        fires on every mouse move during a drag, so it only touches the two boxes that changed."""
+        """paint the drag feedback: tint the tier under the cursor and place the drop bar at the
+        exact between-chips spot the drop would insert at; x_root None clears both. fires on every
+        mouse move during a drag, so each half bails when its state didn't change."""
         target = None if x_root is None else self._hit_tier(x_root, y_root)
-        if target == self._drag_target:
+        if target != self._drag_target:
+            self._drag_target = target
+            for i, box in enumerate(self._boxes):
+                tint = DROP_COLOR if i == target else (
+                    ACCENT if i == self.selected else BORDER)
+                box.frame.configure(border_color=tint)
+                box.sel = None   # we painted behind _sync's back; make it repaint the border next time
+        self._show_drop_bar(target, y_root)
+
+    def _show_drop_bar(self, ti, y_root):
+        """place the drop bar for a hover over tier ti at y_root; ti None hides it.
+        the y mirrors _insert_index exactly (same chip-midpoint walk), so the bar never promises a
+        spot the drop wouldn't take: above the chip it would displace, below the last chip, or
+        across the (empty) placeholder. x/width come off a reference widget's real geometry rather
+        than PAD, so the bar lines up with the chips at any ui scale."""
+        pos = None if ti is None else (ti, self._insert_index(ti, y_root))
+        if pos == self._drop_pos:
             return
-        self._drag_target = target
-        for i, box in enumerate(self._boxes):
-            tint = DROP_COLOR if i == target else (
-                ACCENT if i == self.selected else BORDER)
-            box.frame.configure(border_color=tint)
-            box.sel = None   # we painted behind _sync's back; make it repaint the border next time
+        self._drop_pos = pos
+        if pos is None:
+            self._drop_bar.place_forget()
+            return
+        box = self._boxes[ti]
+        frame, chips, idx = box.frame, box.chips, pos[1]
+        ref = chips[min(idx, len(chips) - 1)] if chips else box.empty
+        if not ref.winfo_ismapped():   # mid-sync, geometry isn't trustworthy yet
+            return
+        x = ref.winfo_rootx() - frame.winfo_rootx()
+        y = ref.winfo_rooty() - frame.winfo_rooty()
+        if not chips:                  # (empty) tier: a full-width bar across the placeholder
+            y += ref.winfo_height() // 2
+            w = frame.winfo_width() - 2 * x
+        elif idx < len(chips):         # above the chip the drop would displace
+            y -= 3
+            w = ref.winfo_width()
+        else:                          # past the last chip: below it
+            y += ref.winfo_height() + 1
+            w = ref.winfo_width()
+        self._drop_bar.place(in_=frame, x=x, y=y, width=max(w, 1))
+        self._drop_bar.lift()
 
     def drop_item_rule(self, rule, x_root, y_root):
         """insert a library-dragged item rule into the tier it was dropped on, at the drop position;
@@ -295,6 +341,8 @@ class TierList(ctk.CTkScrollableFrame):
     def _sync(self):
         """reconcile the widgets to the model, reusing every box and chip whose tier/rule survived."""
         self._drag_target = None
+        self._drop_pos = None
+        self._drop_bar.place_forget()   # chips are about to repack; a stale bar would point wrong
         boxes = [self._box_for(tier) for tier in self.tiers]
         for box in self._boxes:
             if box not in boxes:

@@ -11,11 +11,12 @@ on save.
 
 import customtkinter as ctk
 
-from ..theme import BG_RAISED, BORDER, FONT_SMALL
+from ..theme import BLOOD, BORDER, FONT_SMALL
 
 _enabled = True
 _tips = {}            # toplevel -> _TipWindow, one shared popup per top-level window
-_TIP_WRAP = 300       # px, wrap the lead sentence so a long one doesn't run off-screen
+_TIP_WRAP = 380       # px; tooltips now carry the rendered effect text too, so give the longer
+                      # copy a little more line before it wraps (still narrow enough to stay a tip)
 
 
 def set_enabled(value):
@@ -44,7 +45,9 @@ class _TipWindow:
         self.win.overrideredirect(True)              # no title bar / border, just the box
         self.win.attributes("-topmost", True)
         self.win.configure(fg_color=BORDER)          # 1px outer tint reads as a thin border
-        frame = ctk.CTkFrame(self.win, fg_color=BG_RAISED, corner_radius=6)
+        # the field oxblood, not the control fill: a popup floats over content rather than sitting on
+        # a surface, and BLOOD_LIFT is close enough to BORDER that the ring above would stop reading.
+        frame = ctk.CTkFrame(self.win, fg_color=BLOOD, corner_radius=6)
         frame.pack(padx=1, pady=1)
         self.label = ctk.CTkLabel(frame, justify="left", wraplength=_TIP_WRAP, font=FONT_SMALL)
         self.label.pack(padx=8, pady=5)

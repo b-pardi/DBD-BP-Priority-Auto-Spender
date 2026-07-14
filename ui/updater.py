@@ -35,6 +35,12 @@ from .scrape_runner import style_child_window   # our icon + raised above the pa
 
 _API = f"https://api.github.com/repos/{REPO}/releases"
 
+# tacked onto every prompt raised because a newer release exists. the app and the icon library update
+# separately: a release can carry a scraper fix or a new chapter, and neither reaches the user until
+# they re-run the scrape, so say so wherever we tell them an update is waiting.
+ICONS_NOTE = ("Note: You may need to Update Icons as well (the ⟳ Update icons button in the "
+              "sidebar) to pick up new items and library fixes from this release.")
+
 
 def current_version():
     return __version__
@@ -134,7 +140,7 @@ def download_and_install(app, info):
         if info.get("page") and messagebox.askyesno(
             "update available",
             f"A new version ({info['tag']}) is available, but self-install only works in the "
-            "packaged app.\n\nOpen the download page?",
+            f"packaged app.\n\n{ICONS_NOTE}\n\nOpen the download page?",
         ):
             import webbrowser
             webbrowser.open(info["page"])
@@ -312,7 +318,7 @@ def _apply_and_restart(app, src_root, updir):
     messagebox.showinfo(
         "installing update",
         "The app will now close and reopen to finish updating. This takes a few seconds, you don't "
-        "need to do anything.")
+        f"need to do anything.\n\n{ICONS_NOTE}")
 
     try:
         # CREATE_NO_WINDOW alone: it still gives cmd a (windowless) console, which console tools need.

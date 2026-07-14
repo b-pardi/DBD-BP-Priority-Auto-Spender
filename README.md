@@ -3,9 +3,11 @@
 
 windows/python tool that watches the dead by daylight bloodweb on screen and auto-buys
 nodes in the order you care about. you give it a priority list (specific items like
-"very rare flashlight", or whole categories like "any offering"); it scans the current
+"very rare flashlight", or whole categories like "any perk"); it scans the current
 level, buys the highest-priority nodes available, and when none of your priorities are
 present it clicks the center auto-spend to finish the level and move on.
+
+Nerd Description: Uses a series computer vision thresholding methods exploits the consistent bloodweb node rarity colors (HSV) and the lattice structure of the bloodweb to identify node locations and feed to Hough Circles for node detection. Then these cropped nodes are scaled to 96x96 bgr images feed to a 4 block basic Embedding CNN, 128 dim output vector trained on synthetically generated glyphs from augmented wiki scraped icons.
 
 > notice: dbd runs easy anti-cheat in menus too, technically this is illegal, but similar projects have had no issues. So while I can't guarantee your safety, you'll live.
 >

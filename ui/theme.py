@@ -44,16 +44,23 @@ CTkCanvas.update_idletasks = lambda self: None
 BG_DEEP = "#120d0e"     # the window itself, the darkest thing on screen. red-cast, not blue
 BG_PANEL = "#1c1819"    # content panels, library cards, rule chips, entries, the run log
 
-# oxblood: the deep-red secondary. it takes the app's *chrome* -- the rail that frames everything and
-# every control you press -- so red runs through the structure without ever sitting behind copy. three
-# steps rather than one, so a raised button still reads against the rail it sits on.
+# oxblood: the deep-red secondary. it takes the app's *chrome*, the rail that frames everything and
+# every control you press, so red runs through the structure without ever sitting behind copy.
+#
+# four steps, not three, because a raised control has to read against both surfaces it can land on: the
+# rail, and BLOOD. the second one is the gotcha. ctk hands any frame nested in a default-colored
+# CTkFrame the top_fg_color, so every screen, tier list and bar built without an explicit fg_color IS a
+# BLOOD field whether it meant to be one or not. while the control fill was BLOOD too, controls on a
+# field didn't look flat, they vanished: only the tinted ones (delete, an option menu's gold arrow)
+# were left, reading as stray oversized blocks. so BLOOD and BLOOD_LIFT must never collapse together.
 RAIL = "#1f1013"        # the nav rail: the deepest oxblood, the app's left edge
-BLOOD = "#331a1e"       # raised controls: buttons, option menus, segmented tracks, tooltips
-BLOOD_LIFT = "#45252a"  # hover on them
+BLOOD = "#331a1e"       # the field: the surface the layout lies on (ctk's top_fg_color), + tooltips
+BLOOD_LIFT = "#4a2930"  # raised controls: buttons, option menus, segmented tracks, sliders
+BLOOD_HI = "#5e373f"    # hover on them
 BORDER = "#4d2d31"      # hairlines and unselected borders, so the red threads the layout too
 
-BG_RAISED = BLOOD       # role aliases: widgets ask for what a surface *is*, not what color it is
-BG_HOVER = BLOOD_LIFT
+BG_RAISED = BLOOD_LIFT  # role aliases: widgets ask for what a surface *is*, not what color it is
+BG_HOVER = BLOOD_HI
 
 # ember: the bloodpoint amber, taken well down in saturation. the app's only accent, so it means
 # exactly one thing wherever it shows up: selected, active, or live. deep enough that BONE text sits
@@ -166,6 +173,15 @@ THUMB_PX = 34   # library card / chip thumbnail size (small, so rows stay compac
 ROW_H = 44      # library card height; the windowed list pitches rows by this
 CHIP_H = 40     # placed-rule chip height in a tier
 ACCENT_W = 4    # width of the rarity accent bar on cards/chips
+
+# the vertical breathing room a control needs inside a visible panel, and it is NOT optional. a panel
+# has no height of its own: it is exactly as tall as what you pack into it. so a control packed with no
+# pady makes the panel its own height, and then two things go wrong at once. the panel's rounded
+# corners have nothing to round (the square control corner sits right in them), and ctk paints a
+# widget from a height it round-trips through the ui scale (32px box -> "27" -> repaint 31), so the
+# panel and the control land on different pixel rows and the control's plate sags a pixel or two out
+# the bottom. it reads as sloppy alignment, but nothing is misaligned: the panel is just missing.
+INSET = 6
 
 # note for ctk 6.x: a CTkFrame's size must be set in the constructor (width=/height=), not via a
 # later .configure(); and to actually hold that size against packed children you must turn off

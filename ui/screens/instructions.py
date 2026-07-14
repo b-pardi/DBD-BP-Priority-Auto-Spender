@@ -2,8 +2,8 @@
 
 read-only, no config touched. it's just typography: a CTkScrollableFrame holding numbered step
 sections, callout boxes (danger / warn / tip / notice), a hotkey table, a troubleshooting +
-debug-reporting block, and a clickable github-issues link at the bottom. the three boxes above step 1
-run danger -> warn -> attribution, worst-to-least actionable, so the notice lands last.
+debug-reporting block, and a clickable github-issues link at the bottom. the boxes above step 1
+run anti-cheat note -> display-mode warn -> attribution, most-to-least actionable.
 
 wrapping labels don't know their width until the frame is laid out, so every long label is registered
 in self._wrap_labels and its wraplength is refreshed from the scrollable frame's width on <Configure>.
@@ -197,14 +197,16 @@ class InstructionsScreen(ctk.CTkFrame):
             "launch to a live run, plus how to report a problem if something looks wrong.",
             font=FONT_LEAD, color=theme.ASH)
 
-        # safety first, before any steps; attribution goes last of the three, since it's a notice
-        # rather than something the reader has to act on.
+        # the anti-cheat note first, before any steps; attribution goes last of the three, since
+        # it's a notice rather than something the reader has to act on. deliberately measured, not
+        # scary: menu-only bloodweb automation has a long community track record.
         self._callout(
-            "danger", "Read this first",
-            "Dead by Daylight runs Easy Anti-Cheat in the menus too. Sending automated input is a "
-            "ban risk that you are choosing to take on. There is no way around that. Dry-run mode "
-            "sends no clicks and is the default, so you can try everything safely before anything "
-            "ever touches the game.")
+            "warn", "A note on anti-cheat",
+            "Dead by Daylight runs Easy Anti-Cheat, and this tool works by sending input in the "
+            "menus, so use it at your own discretion. Community tools that automate the bloodweb "
+            "the same way have been around for years with sizeable user bases and no known ban "
+            "waves, but past record isn't a guarantee. Dry-run mode sends no clicks and is the "
+            "default, so you can try everything safely before anything ever touches the game.")
         self._callout(
             "warn", "Run the game in borderless windowed mode",
             "Set Dead by Daylight to Borderless (windowed fullscreen), not exclusive fullscreen. "
@@ -215,7 +217,7 @@ class InstructionsScreen(ctk.CTkFrame):
             "notice", "Attribution",
             "Icon art, names, and descriptions come from deadbydaylight.wiki.gg and are used for "
             "matching and shown here. This is an unofficial fan tool, not affiliated with Behaviour "
-            "Interactive. Game assets © Behaviour Interactive.")
+            "Interactive (but they could hire me though). Game assets © Behaviour Interactive.")
 
         # step 1: icon library
         b = self._section(1, "Get the icon library")
@@ -236,50 +238,109 @@ class InstructionsScreen(ctk.CTkFrame):
         self._para(
             b,
             "Open the Priorities tab. The left side is the full icon library with search and "
-            "filters. The right side is your priority list, arranged as tiers stacked from most "
-            "wanted at the top to least wanted at the bottom.")
+            "filters, the role dropdown narrows to survivor "
+            "gear or to one specific killer's bloodweb, and the event / n/a checkboxes reveal "
+            "event-only and never-buyable glyphs (miscellaneous wiki garbage). The right side is your priority list, arranged "
+            "as tiers stacked from most wanted at the top to least wanted at the bottom. "
+            "If 'within tier' is set to 'Ordered', the ordering of glyphs within each tier will be respected by the matcher, "
+            "if set to random, it won't be."
+            "note: you can drag the divider between the panes to resize them.")
         self._subhead(b, "How buying decides")
         self._para(
             b,
-            "Each scan reads the top tier first and buys the first matching node it finds, then the "
-            "next tier, and so on. It's one buy per scan on purpose, since the game auto-paths to "
+            "Each scan reads the top tier first and buys the first matching node it finds (in order within tier is set to 'Ordered'), "
+            "then the next tier, and so on. It's one buy per scan on purpose, since the game auto-paths to "
             "whatever you click. When none of your tiers match anything left on the web, it clicks "
             "the center to auto-spend the remainder and advance.")
         self._subhead(b, "Adding rules")
-        self._bullet(b, "Add an item two ways: click a library card to drop it into the selected "
-                        "tier, or drag a card from the library onto whichever tier you want (and "
-                        "where in that tier) and release. Either way it picks up the card's rarity "
-                        "by default, which you can toggle off on the placed chip to match any rarity "
-                        "of that item.")
-        self._bullet(b, "Use the rule builder at the bottom right to add a whole category, like "
-                        "“any offering” or “any survivor perk”.")
-        self._bullet(b, "Use the template dropdown to drop in a ready-made catch-all tier, then "
-                        "trim it to taste.")
+        self._bullet(b, "Add an item two ways: click a tier to select it, then the glyph of your choice to add it into the selected "
+                        "tier. Alternatively, drag a glyph from the library into whichever tier you want and release.")
+        self._bullet(b, "Use the group cards at the bottom right to add a whole category, like "
+                        "'any perks'”' or 'any ultra rare addon'.")
+        self._bullet(b, "Use the template dropdown to drop in a pre-made priority profile and salt to taste")
         self._bullet(b, "A tier can be set to ordered, so within that one tier it prefers the "
-                        "rule listed earliest when several match at once.")
+                        "rule listed earliest when there are multiple matches within a single tier.")
         self._subhead(b, "Profiles")
         self._para(
             b,
-            "Profiles are named priority lists. Keep one for your survivor grind and another for a "
-            "killer, then switch between them from the Profile dropdown. Remember to hit Save. An "
-            "unsaved list shows a star on the Save button, and Revert throws away changes since the "
-            "last save.")
+            "Profiles are named priority lists. Keep one for your survivor grind and one per "
+            "killer, then switch between them from the Profile picker. Tag each profile with the "
+            "side dropdown next to it and the picker groups your survivor and killer lists "
+            "separately, so a long list stays navigable.")
+        self._callout(
+            "tip", "Save your profile",
+            "When you finish assembling or editing a priority list, hit Save. A star on the button "
+            "(Save *) means there are unsaved changes, and Revert throws them away. Runs read the "
+            "saved config, so an unsaved list isn't what a run will use. Simply switching profiles "
+            "doesn't need a save; the app remembers your pick on its own.")
 
         # step 3: settings
         b = self._section(3, "Check your settings")
         self._para(
             b,
-            "Open the Settings tab to set the details of how a run behaves. Most defaults are fine, "
-            "but a few are worth knowing about.")
-        self._bullet(b, f"Hotkeys. The start/pause key defaults to {start_key} and the panic key to "
-                        f"{kill_key}. Click either button and press a new key to rebind it.")
-        self._bullet(b, "Matching and detection methods. Leave these on the defaults unless a run is "
-                        "misreading nodes and you want to experiment.")
-        self._bullet(b, "Timing waits. If a live run logs a lot of failed reads, or buys before the "
-                        "web finishes animating, nudge these up a little.")
-        self._bullet(b, "Stops and auto-prestige. Set a run to stop at a bloodpoint floor, a "
-                        "prestige level, or a bloodweb level, and optionally auto-prestige at level "
-                        "50. A value of 0 turns a stop off.")
+            "Open the Settings tab to set the details of how a run behaves. Most defaults are "
+            "fine; here's what each knob actually does, group by group.")
+        self._subhead(b, "Display & accessibility")
+        self._bullet(b, "Text size scales every font and control in the app.")
+        self._bullet(b, "Enable debugging adds the Debug view to the nav rail (see the reporting "
+                        "section at the bottom of this page).")
+        self._bullet(b, "Show tooltips toggles the hover descriptions on library cards and placed "
+                        "rules.")
+        self._subhead(b, "Hotkeys")
+        self._bullet(b, f"The start key (default {start_key}) starts a run, pauses it, and resumes "
+                        "it, and works with the game focused, so you can start from inside DBD. "
+                        f"The panic key (default {kill_key}) always stops. Click a button and press "
+                        "a new key to rebind; restart the app for a rebind to re-arm the global "
+                        "hotkeys.")
+        self._subhead(b, "Detection & matching")
+        self._bullet(b, "Matching method decides how a detected node's icon is identified. cnn "
+                        "(the learned matcher) is the default and the most accurate; ncc, "
+                        "ncc_masked, and phash are classical fallbacks for experiments.")
+        self._bullet(b, "Binarization method and node detection control how node circles are found "
+                        "in the frame. Leave them alone unless the Debug view shows missed or "
+                        "invented nodes.")
+        self._bullet(b, "Presence threshold: after the main pass, empty web slots are re-checked "
+                        "with a learned 'does a node sit here' score, and slots above this floor "
+                        "are recovered as missed nodes. Lower it if real nodes go undetected, "
+                        "raise it if phantom nodes appear.")
+        self._bullet(b, "Matcher rescue min score and margin: a weak icon match normally falls "
+                        "back to hovering the node and reading its tooltip with OCR (sure, but "
+                        "slow). A match that scores at least the min AND beats its runner-up by "
+                        "the margin is trusted without OCR. Raise the margin if wrong items get "
+                        "bought; lower it if runs spend too long hovering.")
+        self._subhead(b, "Match pool")
+        self._bullet(b, "Narrow match pool to priority sources compares each node only against "
+                        "icons that can appear in the webs your priorities imply, so a survivor "
+                        "list never scores another killer's add-ons. Recommended on.")
+        self._bullet(b, "Only compare against the priority list is the strict version: anything "
+                        "not literally in your list reads as unknown. Fastest, but the log tells "
+                        "you less about the rest of the web.")
+        self._bullet(b, "Skip nodes when a weak match's OCR read fails: by default such a node "
+                        "falls back to its best icon guess; flip this on to skip it instead.")
+        self._subhead(b, "Spend order")
+        self._bullet(b, "Race the entity breaks ties within a tier toward the node nearest the "
+                        "entity, since whatever it eats is gone for good. Opt-in, because it "
+                        "changes which node an equal-priority tie picks.")
+        self._subhead(b, "Timing (seconds)")
+        self._bullet(b, "Post-buy settle wait: pause after each buy before the next decision, "
+                        "covering the buy animation. Raise it on a laggy machine.")
+        self._bullet(b, "Entity smoke wait: extra pause before node states are re-read after a "
+                        "buy, so the entity's smoke has finished rendering. 0 is fine too; a "
+                        "missed read self-corrects a buy later.")
+        self._bullet(b, "OCR tooltip wait: how long the game's name tooltip gets to fade in "
+                        "before it's read. Raise it if the log shows failed reads.")
+        self._bullet(b, "Level transition wait: pause after the center auto-spend (and after a "
+                        "prestige) while the web fills and the next level renders. Raise it if "
+                        "scans start mid-transition.")
+        self._subhead(b, "Stops & prestige")
+        self._bullet(b, "Auto-prestige at level 50 clicks the prestige star once the web is spent "
+                        "(costing 20k bloodpoints) and carries on. The prestige animation wait is "
+                        "the pause between that click and looking for the rewards screen's OK "
+                        "button; raise it if the run sits through the animation and misses OK.")
+        self._bullet(b, "Stop at bloodpoints remaining / prestige level / bloodweb level end a run "
+                        "at a floor or a goal; 0 turns a stop off. Separately, every live run "
+                        "stops on its own when it reads that your bloodpoints can't cover the "
+                        "next node it wants.")
         self._para(
             b,
             "Your settings, priority profiles, icon cache, and debug output all live under "
@@ -307,12 +368,19 @@ class InstructionsScreen(ctk.CTkFrame):
         self._para(
             b,
             "When the dry run looks right, uncheck Dry run and Use simulator, then Start. Only a "
-            "live, non-simulator, non-dry run actually clicks in the game. The on-screen Start / "
-            "Pause and Stop buttons mirror the hotkeys, so you can drive it either way.")
+            "live, non-simulator, non-dry run actually clicks in the game. The on-screen buttons "
+            f"mirror the global hotkeys, so you can also tab into the game first and press "
+            f"{start_key} from there — it starts the run just like the Start button.")
         self._callout(
             "tip", "Stopping fast",
             f"Press {kill_key} (or Stop) to cut the run before you queue into a match. The cursor "
             "parks in a corner between actions so it isn't left hovering a node.")
+        self._callout(
+            "tip", "A short warm-up",
+            "The detector builds a small template of what a node looks like on your machine from "
+            "the first webs it sees, so the first level or two of a fresh install can miss a small "
+            "percentage of items. It converges after a couple of levels, and the center auto-spend "
+            "still buys anything a scan missed.")
 
         # hotkeys table
         b = self._section(None, "Hotkey reference")
@@ -402,7 +470,9 @@ class InstructionsScreen(ctk.CTkFrame):
                           "and which it missed. Zoom and pan with the buttons or the mouse wheel.")
         self._bullet(body, "OCR readout. The prestige, bloodweb level, and bloodpoint values it read "
                           "off the screen, so you can check them against what the game shows.")
-        self._bullet(body, "Save frame. Writes the current frame to the debug folder as a PNG.")
+        self._bullet(body, "Save frame. Writes the current frame to the debug folder as PNGs, both "
+                          "the annotated overlay and the raw capture behind it (the raw one is "
+                          "what detection can be re-run against when debugging a report).")
         self._bullet(body, "Maintenance. Open or clear the regenerable cache and the debug-output "
                           "folder, and re-run the icon scraper. Clearing the cache is always safe, "
                           "it rebuilds on demand.")

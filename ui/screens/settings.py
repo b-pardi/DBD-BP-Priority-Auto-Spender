@@ -166,18 +166,26 @@ class SettingsScreen(ctk.CTkFrame):
         self.settle = ctk.CTkEntry(g, width=120)
         self.settle.insert(0, str(cfg.get("settle_s", spender.SETTLE_S)))
         self.settle.grid(row=0, column=1, sticky="w", pady=4)
+        # entity smoke wait: extra pause before the post-buy state re-read. the entity's smoke animates
+        # in, and read too early an eaten node still looks available. raise it if the debug view shows
+        # entity nodes going green; 0 is fine too, since state latches and a miss is caught next buy.
+        ctk.CTkLabel(g, text="Entity smoke wait", anchor="w", width=LABEL_W).grid(
+            row=1, column=0, sticky="w", pady=4)
+        self.entity_settle = ctk.CTkEntry(g, width=120)
+        self.entity_settle.insert(0, str(cfg.get("entity_settle_s", spender.ENTITY_SETTLE_S)))
+        self.entity_settle.grid(row=1, column=1, sticky="w", pady=4)
         # ocr tooltip wait: how long to let dbd's name tooltip fade in before reading it.
         ctk.CTkLabel(g, text="OCR tooltip wait", anchor="w", width=LABEL_W).grid(
-            row=1, column=0, sticky="w", pady=4)
+            row=2, column=0, sticky="w", pady=4)
         self.hover = ctk.CTkEntry(g, width=120)
         self.hover.insert(0, str(cfg.get("ocr_hover_s", ocr.HOVER_DELAY_S)))
-        self.hover.grid(row=1, column=1, sticky="w", pady=4)
+        self.hover.grid(row=2, column=1, sticky="w", pady=4)
         # level transition wait: pause after the center auto-spend for the fill + next web to render
         ctk.CTkLabel(g, text="Level transition wait", anchor="w", width=LABEL_W).grid(
-            row=2, column=0, sticky="w", pady=4)
+            row=3, column=0, sticky="w", pady=4)
         self.advance = ctk.CTkEntry(g, width=120)
         self.advance.insert(0, str(cfg.get("advance_s", spender.ADVANCE_S)))
-        self.advance.grid(row=2, column=1, sticky="w", pady=4)
+        self.advance.grid(row=3, column=1, sticky="w", pady=4)
 
         # --- stops & prestige (all live-only; 0 disables a threshold). see spender.run. ---
         g = self._group("Stops & prestige", "live runs only; 0 turns a stop off")
@@ -307,6 +315,7 @@ class SettingsScreen(ctk.CTkFrame):
         cfg["entity_race"] = bool(self.entity_race_var.get())
         cfg["auto_prestige"] = bool(self.auto_prestige_var.get())
         for key, entry, label in (("settle_s", self.settle, "settle wait"),
+                                  ("entity_settle_s", self.entity_settle, "entity smoke wait"),
                                   ("ocr_hover_s", self.hover, "OCR tooltip wait"),
                                   ("advance_s", self.advance, "level transition wait"),
                                   ("prestige_wait_s", self.prestige_wait, "prestige animation wait")):

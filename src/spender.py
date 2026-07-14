@@ -39,6 +39,11 @@ IDLE_POLL_S = 0.05   # how often the loop re-checks the switch while idle or pau
 REPICK_TOL_PX = 20   # spot-match tolerance for the don't-repick guard, tune with node spacing
 PARK_TOL_PX = 25     # how far the cursor may drift from PARK_XY before a scan re-parks it
 PARK_FADE_S = 0.5    # post-re-park wait for a hovered tooltip to fade before the re-grab
+# extra wait before the post-buy state re-read, so the entity's smoke has finished animating in when we
+# look. it half-renders otherwise and an eaten node reads as still available. latching (see
+# refresh_states) already recovers those a buy later, so this only buys back the CURRENT buy, and it is
+# paid on every buy: turn it down to 0 for speed, up if the debug view still shows misses.
+ENTITY_SETTLE_S = 0.4
 
 DEFAULT_CONFIG = paths.config_path()   # frozen-aware: repo config/ in dev, %APPDATA%/dbdbp-pas when frozen
 VALID_CATEGORIES = {"item", "addon", "offering", "perk", "power"}
@@ -244,6 +249,7 @@ def load_config(path=None):
     # off by default because it CHANGES which node an equal-priority tie picks, and that's the user's
     # call, not ours.
     cfg.setdefault("entity_race", False)
+    cfg.setdefault("entity_settle_s", ENTITY_SETTLE_S)   # smoke-render wait before the state re-read
     # ui-only display prefs (the engine ignores them); kept here so the single serializer round-trips
     # them and they default sanely on an older file. see ui.widgets.tooltip + ui.library.filter.
     cfg.setdefault("show_tooltips", True)
@@ -277,6 +283,27 @@ def save_config(cfg, path=None):
     return path
 
 
+def park_xy(frame, region):
+    """screen coords of the off-web cursor rest spot for this frame (Resolution.PARK_XY)."""
+    h, w = frame.shape[:2]
+    return capture.frame_to_screen(
+        int(Resolution.PARK_XY[0] * w), int(Resolution.PARK_XY[1] * h), region)
+
+
+def park_cursor(frame, region):
+    """move the cursor off the web, so the next grab is a clean read of the web.
+
+    THE INVARIANT: every frame the loop reads must be grabbed with the cursor parked. left on a node,
+    dbd draws its tooltip panel over the web, and that panel covers other nodes: it hides their socket
+    rings, and the ring is the whole state read (detect.read_node_state), so a bought node under a
+    tooltip reads back as available and we re-click a node we already own. it also lands in the debug
+    view's annotated frame, over the detections you're trying to look at.
+    """
+    px, py = park_xy(frame, region)
+    input_control.move_to(px, py)
+    return px, py
+
+
 # node sources from live capture
 def live_source(
         rows, ncc_templates, region=None, matcher="cnn",
@@ -299,10 +326,7 @@ def live_source(
         # new center node, undoing do_auto_spend's park and leaving its tooltip over the fresh web.
         # if the cursor drifted off the park spot, re-park, let the tooltip fade, and re-grab a clean
         # frame. also covers a run started with the cursor on a node.
-        h, w = frame.shape[:2]
-        px, py = capture.frame_to_screen(
-            int(Resolution.PARK_XY[0] * w), int(Resolution.PARK_XY[1] * h), reg,
-        )
+        px, py = park_xy(frame, reg)
         cx, cy = input_control.get_position()
         if abs(cx - px) > PARK_TOL_PX or abs(cy - py) > PARK_TOL_PX:
             input_control.move_to(px, py)
@@ -450,23 +474,31 @@ def _break_tie(hits, nodes, entity_race):
 
 
 def refresh_states(nodes, frame):
-    """re-read every node's live state off a fresh frame, in place. returns the counts that CHANGED.
+    """re-read the still-available nodes' state off a fresh frame, in place. returns what CHANGED.
 
-    the whole point of the once-per-level scan is that node positions don't move within a level, and
-    that cuts both ways: it also means a state re-read needs no re-detect. no find_circles, no glyph
-    extraction, no matcher, no ocr hover, just a color read of each socket ring at coords we already
-    have. cheap enough to run after every buy, which is what makes it worth having: dbd auto-buys the
-    whole cheapest path to whatever we click, and the entity eats nodes mid-web, and a stale snapshot
-    sees neither (measured: 8 of 22 targets on one spent fixture were already dead).
+    the once-per-level scan works because node positions don't move within a level, and that cuts both
+    ways: a state re-read needs no re-detect either. no find_circles, no glyph extraction, no matcher,
+    no ocr hover, just a color read of each socket ring at coords we already have. cheap enough to run
+    after every buy, which is the point: dbd auto-buys the whole cheapest path to whatever we click and
+    the entity eats nodes mid-web, and a stale snapshot sees neither (8 of 22 targets on one spent
+    fixture were already dead).
+
+    STATE LATCHES, and that is what makes the entity read reliable. a node never un-buys and the entity
+    never gives one back, so state only ever moves away from 'available' and a taken node is simply
+    never re-read. it has to work this way: the entity's smoke pulses and half-renders, so any single
+    frame misses ~12% of eaten nodes (they read fine a frame later). latching turns that per-frame read
+    into a cumulative one, and since a refresh follows every buy, a miss self-corrects almost at once
+    (88% per frame -> 100% over the 8-frame live capture). it also gets cheaper as a web fills.
 
     a node with no lattice geometry (no fit that scan) can't be re-read and stays available."""
     # the center is skipped, not just spared the work: its own red entity glow reads as 'bought'.
-    live = [n for n in nodes if not n.is_center and n.ring_r and n.slot_xy]
+    live = [n for n in nodes
+            if not n.is_center and not n.taken and n.ring_r and n.slot_xy]
     states = detect.read_node_states(
         frame, [(n.slot_xy[0], n.slot_xy[1], n.ring_r) for n in live])
     delta = {}
     for n, state in zip(live, states):
-        if state != n.state:
+        if state != n.state:            # live is available-only, so this only ever latches a node taken
             delta[state] = delta.get(state, 0) + 1
             n.state = state
     return delta
@@ -566,11 +598,7 @@ def do_prestige(center_xy, frame, region, hold_s=0.05, prestige_wait_s=PRESTIGE_
         time.sleep(ok_wait_s)   # rewards screen not up yet, wait and re-check
     time.sleep(advance_s)   # bloodweb transition timer: let the fresh level-1 web render
 
-    # park off-web so the next scan's grab holds no hovered tooltip (same PARK_XY as the ocr park).
-    h, w = frame.shape[:2]
-    px_f, py_f = Resolution.PARK_XY
-    park_x, park_y = capture.frame_to_screen(int(px_f * w), int(py_f * h), region)
-    input_control.move_to(park_x, park_y)
+    park_cursor(frame, region)   # so the next scan's grab holds no hovered tooltip
 
 
 def do_auto_spend(nodes, frame, region, hold_s=0.05, advance_s=ADVANCE_S):
@@ -596,15 +624,11 @@ def do_auto_spend(nodes, frame, region, hold_s=0.05, advance_s=ADVANCE_S):
     input_control.click_node(sx, sy, hold_s=hold_s)
     time.sleep(advance_s)   # let the fill + level transition play out
 
-    # park off-web (PARK_XY) AFTER the transition, not before: dbd re-centers the cursor onto the
-    # center node while the level loads, so a pre-wait park gets undone (leaving the auto-spend
-    # tooltip over the fresh web). parking once settled makes it stick, and the loop's settle_s wait
-    # lets the tooltip fade before the next scan. same PARK_XY spot as the ocr hover park.
+    # park AFTER the transition, not before: dbd re-centers the cursor onto the center node while the
+    # level loads, so a pre-wait park gets undone (leaving the auto-spend tooltip over the fresh web).
+    # parking once settled makes it stick, and the loop's settle_s wait lets the tooltip fade.
     if frame is not None:
-        h, w = frame.shape[:2]
-        px_f, py_f = Resolution.PARK_XY
-        park_x, park_y = capture.frame_to_screen(int(px_f * w), int(py_f * h), region)
-        input_control.move_to(park_x, park_y)
+        park_cursor(frame, region)
 
 
 SCAN_KEEP = 8   # debug scan pairs kept on disk before the oldest are pruned
@@ -720,6 +744,7 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
     cost_table = config.get("rarity_bp_cost") or RARITY_BP_COST
     # timing knobs, all tunable from the settings ui to slow the loop down on a laggy machine.
     settle_s = config.get("settle_s", SETTLE_S)         # post-buy wait before the next pick
+    entity_settle_s = config.get("entity_settle_s", ENTITY_SETTLE_S)  # extra wait for the entity smoke to render
     advance_s = config.get("advance_s", ADVANCE_S)      # wait for the level transition after auto-spend
     prestige_wait_s = config.get("prestige_wait_s", PRESTIGE_WAIT_S)  # post-prestige-click wait before the ok button
     hover_s = config.get("ocr_hover_s", ocr.HOVER_DELAY_S)  # tooltip fade-in wait before an ocr read
@@ -857,16 +882,27 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
                           f"{runner} @ {choice.x},{choice.y}{_pick_note(choice)}")
                 sx, sy = capture.frame_to_screen(choice.x, choice.y, region)
                 input_control.click_node(sx, sy)
+                # park NOW, not just before the grab below: the click leaves the cursor sitting on the
+                # node, and parking here lets dbd's tooltip fade DURING the settle wait we already pay
+                # rather than adding a fade wait of its own to every single buy.
+                if frame is not None:
+                    park_cursor(frame, region)
             spent.append((choice.x, choice.y))   # remember the spot so we don't re-pick it
             if consume:
                 consume(choice)                  # sim drops it from the web; live no-op
-            _interruptible_sleep(switch, settle_s)  # let the buy animation play before the next
+            # the wait covers the buy animation, the tooltip fade, and the entity's smoke animating in:
+            # the next thing we do is read state off a fresh grab, so all three have to be done.
+            # (dry-run clicks nothing, so none of them apply and it keeps the plain settle.)
+            _interruptible_sleep(switch, settle_s if dry_run
+                                 else max(settle_s, PARK_FADE_S) + entity_settle_s)
 
             # that click bought more than the one node we aimed at (dbd auto-buys the whole cheapest
             # path to it) and the entity may have eaten a few more, so re-read the web before the next
             # pick rather than trusting a snapshot that is now several buys out of date. cheap: no
             # re-detect, just a color read at coords we already have (see refresh_states).
-            # AFTER the settle wait, not before: mid-animation the ring is only half drawn.
+            # the grab is clean because we parked above (see park_cursor: a tooltip over the web hides
+            # the very rings this reads), and it is AFTER the settle, not before, because mid-animation
+            # the ring is only half drawn.
             if not dry_run and frame is not None and not switch.killed:
                 frame, region = capture.grab_with_region(region)
                 delta = refresh_states(nodes, frame)

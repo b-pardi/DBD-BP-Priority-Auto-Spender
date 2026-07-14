@@ -4,6 +4,10 @@
 - fixed wiki scraper to grab new chapter items handling weird wiki quirks with those
     - note also implicitly fixes `Toothy Torte` only showing as `10th anniversary`
 - fixed text norm for perks with '&' or accents
+- retrained model with fixed scraped icons and a few tweaks:
+    - tuned
+    - 
+
 
 
 ### v0.2.0-beta

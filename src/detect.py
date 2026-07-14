@@ -779,20 +779,34 @@ STATE_AVAILABLE = "available"
 STATE_BOUGHT = "bought"
 STATE_ENTITY = "entity"
 
-# thresholds sit midway between the classes, measured over 3 spent webs / 90 hand-labeled slots:
-#   hot    bought >= 0.45   others <= 0.09
-#   gore   entity >= 0.20   others <= 0.15
-#   black  entity >= 0.53   others <= 0.34
-# entity needs gore AND black, so a false positive has to beat both (none of the 83 non-entity slots does).
+# bought: a BRIGHT red ring on the 0.74-0.90r band. dead clean, 0.45 vs 0.09 over every web measured.
 BOUGHT_HOT_MIN = 0.22
-ENTITY_GORE_MIN = 0.17
-ENTITY_BLACK_MIN = 0.44
 
-# bgr, draw_detections only: taken nodes should be obvious at a glance in the debug view
+# entity: black socket OR maroon halo. an OR, not an AND (2026-07-13 retune, 87 labeled entity nodes
+# + 642 available): the halo is an ADDITIVE glow, so over the bright campfire at the bottom of the web
+# it washes out completely while the ring is still plainly black. the AND was rejecting exactly those
+# nodes and cost 16pp of recall for no precision gain.
+# the black band is 0.82-1.00r, ENTIRELY inside the node: the entity darkens by alpha, so its soft
+# outer edge stays bright over a bright floor and any band reaching past the rim reads background, not
+# node. thresholds sit just above the worst available node (black 0.49, gore 0.42).
+ENTITY_BLACK_MIN = 0.50   # frac of the 0.82-1.00r socket under ENTITY_BLACK_V
+ENTITY_BLACK_V = 38
+ENTITY_GORE_MIN = 0.45    # frac of the 0.90-1.12r ring that is dark maroon
+# the smoke PULSES and half-renders, so a single frame still misses ~12% of eaten nodes. that is not
+# fixed here but in spender.refresh_states, which LATCHES: consumption is monotone, so a miss now is
+# caught by the next buy's re-read (per-frame 88% -> 100% cumulative on the 8-frame live capture).
+
+# draw_detections only. the ring color is the only thing still legible at the debug view's fit zoom
+# (a 3440px frame scaled to ~26%), so it carries the state; the banner spells out WHO grabbed the node
+# once you zoom in. 'us' covers both our own click and the auto-path buys it dragged along with it.
 STATE_COLORS = {
     STATE_AVAILABLE: (0, 255, 0),      # green
     STATE_BOUGHT: (0, 0, 255),         # red
     STATE_ENTITY: (255, 0, 255),       # magenta
+}
+STATE_LABELS = {
+    STATE_BOUGHT: "grabbed: us",
+    STATE_ENTITY: "grabbed: entity",
 }
 
 
@@ -819,8 +833,9 @@ def read_node_state(hsv, x, y, r):
     node's disk color is meaningless so its r_ref can't be trusted (and isolate often fails outright).
     an unreadable ring returns 'available', i.e. the pre-state behavior of treating every node as buyable."""
     inner = _annulus_px(hsv, x, y, r, 0.74, 0.90)
+    socket = _annulus_px(hsv, x, y, r, 0.82, 1.00)
     ring = _annulus_px(hsv, x, y, r, 0.90, 1.12)
-    if inner is None or ring is None:
+    if inner is None or socket is None or ring is None:
         return STATE_AVAILABLE
 
     h, s, v = inner[:, 0].astype(int), inner[:, 1].astype(int), inner[:, 2].astype(int)
@@ -828,10 +843,10 @@ def read_node_state(hsv, x, y, r):
     if float((seam & (s >= 110) & (v >= 80)).mean()) >= BOUGHT_HOT_MIN:
         return STATE_BOUGHT
 
+    black = float((socket[:, 2] <= ENTITY_BLACK_V).mean())                        # blacked-out socket
     h, s, v = ring[:, 0].astype(int), ring[:, 1].astype(int), ring[:, 2].astype(int)
     gore = float(((np.minimum(h, 180 - h) <= 8) & (s >= 60) & (v < 80)).mean())   # dark maroon halo
-    black = float((v <= 42).mean())                                                # blacked-out ring
-    if gore >= ENTITY_GORE_MIN and black >= ENTITY_BLACK_MIN:
+    if black >= ENTITY_BLACK_MIN or gore >= ENTITY_GORE_MIN:
         return STATE_ENTITY
     return STATE_AVAILABLE
 
@@ -1238,47 +1253,49 @@ def _score_str(n):
 
 def draw_detections(frame, nodes):
     """draw each node (circle + label) onto a copy of the frame. accepts detect() result dicts,
-    the (x, y, r, rarity) tuples from find_nodes_in_frame, or spender's Node objects, so it works
-    at any stage of the pipeline.
-    dict label is two lines, 'rarity/socket score' then the matched name; Node label adds a third
-    line so the matcher's read and a later ocr settle (or 'na' if none was needed) both stay visible.
-    keys come straight off detect()'s output (rar, cat, score, matcher, match row)."""
+    the find_nodes_in_frame tuples, or spender's Node objects, so it works at any stage of the pipeline.
+    a grabbed node (bought / entity) keeps its identity lines and gains a 'grabbed: by-who' banner on
+    top, colored + ringed by state: a node grabbed MID-WEB was identified back when it was still
+    available, and that read is exactly what says whether the thing we just lost was one we wanted.
+    (a node already grabbed at the first scan never got identified, since detect skips the matcher on
+    it, so it has nothing under the banner to show.)"""
     out = frame.copy()
     for n in nodes:
         state = STATE_AVAILABLE
         if isinstance(n, dict):
             x, y, r = n["x"], n["y"], n["r"]
             state = n.get("state", STATE_AVAILABLE)
+            match = n.get("match")
             if n.get("kind") == "center":
                 lines = ["autospend"]
-            elif state != STATE_AVAILABLE:
-                lines = [state]                  # taken: never identified, so there's no name to show
             else:
-                match = n.get("match") or {} # match is a library row dict (or None)
-                name = match.get("name") or match.get("key") or "?"
-                # name on its own line so long icon names stay legible over the busy web
-                lines = [f"{n.get('rar', '?')}/{n.get('cat', '?')} {_score_str(n)}", name]
+                lines = [STATE_LABELS[state]] if state != STATE_AVAILABLE else []
+                if match or state == STATE_AVAILABLE:
+                    m = match or {}   # match is a library row dict (or None)
+                    # name on its own line so long icon names stay legible over the busy web
+                    lines += [f"{n.get('rar', '?')}/{n.get('cat', '?')} {_score_str(n)}",
+                              m.get("name") or m.get("key") or "?"]
         elif isinstance(n, tuple):
             x, y, r, rarity = n[:4]              # find_nodes_in_frame tuples carry slot/state/ring_r too
             state = n[5] if len(n) > 5 else STATE_AVAILABLE
-            lines = [str(rarity) if state == STATE_AVAILABLE else state]
+            lines = ([STATE_LABELS[state]] if state != STATE_AVAILABLE else []) + [str(rarity)]
         else:
             # spender.Node: the boundary object the live loop resolves nodes into, post-ocr
             x, y, r = n.x, n.y, n.r
             state = n.state
             if n.is_center:
                 lines = ["autospend"]
-            elif n.taken:
-                lines = [n.state]                # taken: never identified, so there's no name to show
             else:
-                # matched_name/score are the matcher's own read, frozen before ocr can overwrite
-                # node.name; ocr read is only shown when it actually settled the node (resolved_by).
-                ocr_read = n.name if n.resolved_by == "ocr" else "na"
-                lines = [
-                    f"{n.rarity}/{n.socket_shape}",
-                    f"{n.matcher}: {n.matched_name or '?'} {n.score:.2f}",
-                    f"ocr: {ocr_read}",
-                ]
+                lines = [STATE_LABELS[n.state]] if n.taken else []
+                if not n.taken or n.matched_name or n.name:
+                    # matched_name/score are the matcher's own read, frozen before ocr can overwrite
+                    # node.name; ocr read is only shown when it actually settled the node (resolved_by).
+                    ocr_read = n.name if n.resolved_by == "ocr" else "na"
+                    lines += [
+                        f"{n.rarity}/{n.socket_shape}",
+                        f"{n.matcher}: {n.matched_name or '?'} {n.score:.2f}",
+                        f"ocr: {ocr_read}",
+                    ]
         col = STATE_COLORS.get(state, (0, 255, 0))   # taken nodes stand out at a glance in the debug view
         cv2.circle(out, (x, y), r, col, 2)
         # stack the lines just above the circle, last line nearest the rim

@@ -93,6 +93,14 @@ class DebugScreen(ctk.CTkFrame):
         ctk.CTkButton(toolbar, text="+", width=32, command=self._zoom_in).pack(side="left")
         ctk.CTkButton(toolbar, text="Fit", width=48, command=self._zoom_reset).pack(
             side="left", padx=(4, 0))
+        # node-state key for the overlay rings (detect.STATE_COLORS). at fit zoom a 3440px frame is
+        # scaled to ~26% and the per-node labels are unreadable, but the ring color still is, so the
+        # color is the only state read you get without zooming in. hex here mirrors those bgr values.
+        ctk.CTkLabel(toolbar, text="nodes:", font=theme.FONT_SMALL, text_color="gray").pack(
+            side="left", padx=(theme.PAD, 2))
+        for text, color in (("available", "#00E000"), ("bought", "#FF3B3B"), ("entity", "#FF5CFF")):
+            ctk.CTkLabel(toolbar, text=text, font=theme.FONT_SMALL, text_color=color).pack(
+                side="left", padx=3)
         ctk.CTkButton(toolbar, text="Save frame", command=self._save_frame).pack(
             side="right")
         # ocr'd run status (prestige / bloodweb level / bp), fed by the run loop each live scan when a

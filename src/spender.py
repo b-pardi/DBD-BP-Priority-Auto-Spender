@@ -26,34 +26,22 @@ from ctypes import wintypes
 from pathlib import Path
 
 from . import capture, detect, input_control, ocr, paths
+from .defaults import (
+    ADVANCE_S, DEFAULT_SETTINGS, ENTITY_SETTLE_S, KILL_KEY, PRESENCE_THRESH_DEFAULT,
+    PRESTIGE_WAIT_S, RESCUE_MARGIN_DEFAULT, RESCUE_MIN_DEFAULT, SETTLE_S, START_KEY,
+)
 from .node import (
-    CNN_RESCUE_MARGIN, CNN_RESCUE_MIN, Node, build_pool_mask, set_rescue_gate, tier_is_ordered,
-    tier_rules,
+    Node, build_pool_mask, set_rescue_gate, tier_is_ordered, tier_rules,
 )
 from .resolution import Resolution
 from .sim import sim_source
 
-# pristine defaults for the tunable detection gates, frozen at import BEFORE any runtime override
-# mutates the module globals (set_presence_thresh / set_rescue_gate), so a config missing a knob
-# always falls back to the calibrated value and never to a previous run's override.
-PRESENCE_THRESH_DEFAULT = detect.PRESENCE_THRESH
-RESCUE_MIN_DEFAULT = CNN_RESCUE_MIN
-RESCUE_MARGIN_DEFAULT = CNN_RESCUE_MARGIN
-
-KILL_KEY = "f8"      # dedicated always-stop panic hotkey, only ever stops, never resumes
-START_KEY = "f7"     # start/pause toggle, idle -> running -> paused -> running
-SETTLE_S = 0.6       # post-buy wait before the rescan, tune live like input_control.hold_s
-ADVANCE_S = 3.0      # post-auto-spend wait for the fill + level transition to play out
-PRESTIGE_WAIT_S = 5.0  # post-prestige-click wait for the animation before the rewards OK button appears
+# the tunable settings defaults (keys + values) live in defaults.py, imported above so there is one
+# source of truth; only the loop-internal constants nothing else configures stay local here.
 IDLE_POLL_S = 0.05   # how often the loop re-checks the switch while idle or paused
 REPICK_TOL_PX = 20   # spot-match tolerance for the don't-repick guard, tune with node spacing
 PARK_TOL_PX = 25     # how far the cursor may drift from PARK_XY before a scan re-parks it
 PARK_FADE_S = 0.5    # post-re-park wait for a hovered tooltip to fade before the re-grab
-# extra wait before the post-buy state re-read, so the entity's smoke has finished animating in when we
-# look. it half-renders otherwise and an eaten node reads as still available. latching (see
-# refresh_states) already recovers those a buy later, so this only buys back the CURRENT buy, and it is
-# paid on every buy: turn it down to 0 for speed, up if the debug view still shows misses.
-ENTITY_SETTLE_S = 0.4
 
 DEFAULT_CONFIG = paths.config_path()   # frozen-aware: repo config/ in dev, %APPDATA%/dbdbp-pas when frozen
 VALID_CATEGORIES = {"item", "addon", "offering", "perk", "power"}
@@ -248,40 +236,18 @@ def load_config(path=None):
         for i, rule in enumerate(tier_rules(tier)):
             _validate_rule(rule, where=f"priorities[{t}][{i}]")
 
-    cfg.setdefault("dry_run", True)
-    cfg.setdefault("stop_bp_threshold", 0)
-    # auto-prestige at bloodweb level 50 (click the star, dismiss the rewards screen, keep going).
-    # off by default: prestiging spends 20k bp and resets the character, so it's opt-in.
-    cfg.setdefault("auto_prestige", False)
-    cfg.setdefault("prestige_wait_s", PRESTIGE_WAIT_S)  # click star -> wait -> rewards OK appears
-    # level goal-stop: stop once the character reaches this (prestige, bloodweb level). 0 disables a
-    # component. stop_prestige with stop_level 0 means "stop the moment that prestige is reached".
-    cfg.setdefault("stop_prestige", 0)
-    cfg.setdefault("stop_level", 0)
-    # comparison-pool narrowing (see node.build_pool_mask): inferred (each priority item's whole
-    # bloodweb source) on by default, exclusive (only the listed icons) off. exclusive is a subset
-    # of inferred, so the ui keeps inferred forced on whenever exclusive is set.
-    cfg.setdefault("pool_inferred", True)
-    cfg.setdefault("pool_exclusive", False)
-    # entity race: break within-tier ties toward the nodes the entity is about to eat (see _break_tie).
-    # off by default because it CHANGES which node an equal-priority tie picks, and that's the user's
-    # call, not ours.
-    cfg.setdefault("entity_race", False)
-    cfg.setdefault("entity_settle_s", ENTITY_SETTLE_S)   # smoke-render wait before the state re-read
-    # detection tuning gates surfaced in the settings ui, so they can be re-tuned on another user's
-    # machine without shipping a build (run() pushes them into detect/node before the first scan).
-    cfg.setdefault("presence_thresh", PRESENCE_THRESH_DEFAULT)
-    cfg.setdefault("matcher_rescue_min", RESCUE_MIN_DEFAULT)
-    cfg.setdefault("matcher_rescue_margin", RESCUE_MARGIN_DEFAULT)
-    # ui-only display prefs (the engine ignores them); kept here so the single serializer round-trips
-    # them and they default sanely on an older file. see ui.widgets.tooltip + ui.library.filter.
-    cfg.setdefault("show_tooltips", True)
+    # every settings-screen knob defaults from the one map in defaults.py (matcher, timing, hotkeys,
+    # pool flags, stops & prestige, ui_scale, tooltips, the detection gates run() pushes into
+    # detect/node, ...), so an older/incomplete file fills in and the "Restore defaults" button and
+    # this loader can never disagree on a value.
+    for key, val in DEFAULT_SETTINGS.items():
+        cfg.setdefault(key, val)
+    # the rest are not settings-screen knobs, so they live here rather than in DEFAULT_SETTINGS:
+    cfg.setdefault("dry_run", True)              # run-screen safety toggle
     # library reveal filters: event glyphs show by default, retired/power ("n/a") rows stay hidden.
     # (supersedes the single hide_unavailable flag, which lumped both behind one checkbox.)
     cfg.setdefault("show_event", True)
     cfg.setdefault("show_na", False)
-    # accessibility text/widget scale applied app-wide via ctk.set_widget_scaling. 1.0 = default size.
-    cfg.setdefault("ui_scale", 1.0)
     return cfg
 
 

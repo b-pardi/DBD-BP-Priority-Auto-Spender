@@ -27,6 +27,7 @@ CALLOUTS = {
     "danger": {"bg": "#251316", "accent": theme.DANGER, "icon": "⚠"},
     "warn":   {"bg": "#221c11", "accent": theme.ACCENT_BRIGHT, "icon": "!"},
     "tip":    {"bg": "#161c1f", "accent": "#7d8c94", "icon": "★"},   # fog: quieter than the accent
+    "info":   {"bg": "#161b20", "accent": "#7d8c94", "icon": "⏳"},  # a patient heads-up, e.g. warm-up
     "notice": {"bg": "#1e1a20", "accent": "#7a6f86", "icon": "©"},   # attribution, dimmest of all
 }
 
@@ -214,6 +215,12 @@ class InstructionsScreen(ctk.CTkFrame):
             "blocks the panic hotkey. Borderless looks identical and makes capture, clicking, and "
             f"the {start_key}/{kill_key} hotkeys all work.")
         self._callout(
+            "info", "A short warm-up",
+            "The detector builds a small template of what a node looks like on your machine from "
+            "the first webs it sees, so the first level or two of a fresh install can miss a small "
+            "percentage of items. It converges after a couple of levels, and the center auto-spend "
+            "still buys anything a scan missed.")
+        self._callout(
             "notice", "Attribution",
             "Icon art, names, and descriptions come from deadbydaylight.wiki.gg and are used for "
             "matching and shown here. This is an unofficial fan tool, not affiliated with Behaviour "
@@ -243,7 +250,7 @@ class InstructionsScreen(ctk.CTkFrame):
             "event-only and never-buyable glyphs (miscellaneous wiki garbage). The right side is your priority list, arranged "
             "as tiers stacked from most wanted at the top to least wanted at the bottom. "
             "If 'within tier' is set to 'Ordered', the ordering of glyphs within each tier will be respected by the matcher, "
-            "if set to random, it won't be."
+            "if set to random, it won't be. "
             "note: you can drag the divider between the panes to resize them.")
         self._subhead(b, "How buying decides")
         self._para(
@@ -256,23 +263,21 @@ class InstructionsScreen(ctk.CTkFrame):
         self._bullet(b, "Add an item two ways: click a tier to select it, then the glyph of your choice to add it into the selected "
                         "tier. Alternatively, drag a glyph from the library into whichever tier you want and release.")
         self._bullet(b, "Use the group cards at the bottom right to add a whole category, like "
-                        "'any perks'”' or 'any ultra rare addon'.")
+                        "'any perks' or 'any ultra rare addon'.")
         self._bullet(b, "Use the template dropdown to drop in a pre-made priority profile and salt to taste")
         self._bullet(b, "A tier can be set to ordered, so within that one tier it prefers the "
                         "rule listed earliest when there are multiple matches within a single tier.")
         self._subhead(b, "Profiles")
         self._para(
             b,
-            "Profiles are named priority lists. Keep one for your survivor grind and one per "
-            "killer, then switch between them from the Profile picker. Tag each profile with the "
-            "side dropdown next to it and the picker groups your survivor and killer lists "
-            "separately, so a long list stays navigable.")
+            "Profiles are named priority lists. Useful for keeping survivor / indvidual killer lists separated. Tag each profile with the "
+            "side dropdown next to it and the spender groups your survivor and killer lists "
+            "separately. \nOr don't do that, I'm not your dad, I'm not gonna tell you how to live your life.")
         self._callout(
             "tip", "Save your profile",
             "When you finish assembling or editing a priority list, hit Save. A star on the button "
             "(Save *) means there are unsaved changes, and Revert throws them away. Runs read the "
-            "saved config, so an unsaved list isn't what a run will use. Simply switching profiles "
-            "doesn't need a save; the app remembers your pick on its own.")
+            "saved config, so an unsaved list isn't what a run will use. You don't need to save when switching profiles, just when changing them.")
 
         # step 3: settings
         b = self._section(3, "Check your settings")
@@ -289,7 +294,7 @@ class InstructionsScreen(ctk.CTkFrame):
         self._subhead(b, "Hotkeys")
         self._bullet(b, f"The start key (default {start_key}) starts a run, pauses it, and resumes "
                         "it, and works with the game focused, so you can start from inside DBD. "
-                        f"The panic key (default {kill_key}) always stops. Click a button and press "
+                        f"The panic/kill key (default {kill_key}) always stops. Click a button and press "
                         "a new key to rebind; restart the app for a rebind to re-arm the global "
                         "hotkeys.")
         self._subhead(b, "Detection & matching")
@@ -351,36 +356,22 @@ class InstructionsScreen(ctk.CTkFrame):
         b = self._section(4, "Test with a dry run first")
         self._para(
             b,
-            "Open the Run tab. Before letting it touch the game, prove your list does what you "
-            "expect. Two safe ways, neither sends a single click:")
-        self._bullet(b, "Use simulator generates fake bloodweb levels with no game needed, so you "
-                        "can watch which nodes your priorities pick. This mode is always dry.")
-        self._bullet(b, "Dry run (no clicks) runs against the real game on screen and logs every "
-                        "buy it would make, without actually clicking. Open the game to a bloodweb, "
-                        "start it, and read the log.")
+            "Open the Run tab. The default mode is 'Dry run', which does everything except actually clicking. "
+            "expect. As an added bonus, defaulting to dry run may keep Behaviour from suing me.")
         self._para(
             b,
-            "Watch the log pane. Each decision is written out so you can confirm it's picking the "
-            "right nodes in the right order before you hand it real input.")
+            "Watch the log pane (or look at it after if you're too poor for a second monitor it's ok I've been there too). "
+            "Each decision is written out so you can confirm it's picking the right nodes in the right order before you hand it real input.")
 
         # step 5: go live
         b = self._section(5, "Go live")
         self._para(
             b,
-            "When the dry run looks right, uncheck Dry run and Use simulator, then Start. Only a "
+            "When the dry run looks right, uncheck 'Use simulator' and 'Dry run', then Start. Only a "
             "live, non-simulator, non-dry run actually clicks in the game. The on-screen buttons "
-            f"mirror the global hotkeys, so you can also tab into the game first and press "
-            f"{start_key} from there — it starts the run just like the Start button.")
-        self._callout(
-            "tip", "Stopping fast",
-            f"Press {kill_key} (or Stop) to cut the run before you queue into a match. The cursor "
-            "parks in a corner between actions so it isn't left hovering a node.")
-        self._callout(
-            "tip", "A short warm-up",
-            "The detector builds a small template of what a node looks like on your machine from "
-            "the first webs it sees, so the first level or two of a fresh install can miss a small "
-            "percentage of items. It converges after a couple of levels, and the center auto-spend "
-            "still buys anything a scan missed.")
+            f"mirror the global hotkeys, so you single monitor plebs can tab into the game first and press "
+            f"{start_key} from there.")
+        
 
         # hotkeys table
         b = self._section(None, "Hotkey reference")

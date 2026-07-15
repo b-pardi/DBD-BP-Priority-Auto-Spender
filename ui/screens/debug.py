@@ -41,6 +41,7 @@ class DebugScreen(ctk.CTkFrame):
         self._log_q = queue.Queue()
         self._tk_img = None        # keep a ref so the canvas PhotoImage isn't garbage-collected
         self._scraping = False
+        self._selftesting = False  # a build self-test is running on a worker thread
         self._last_frame = None    # newest annotated bgr frame, kept full-res for zoom/save
         self._last_raw = None      # the clean grab behind it (None until a run supplies one)
         # zoom is always a real percent of native. _fit=True re-derives that percent to fit the panel
@@ -189,6 +190,17 @@ class DebugScreen(ctk.CTkFrame):
         self.scrape_btn = ctk.CTkButton(scrp, text="Run scraper", command=self._run_scraper)
         self.scrape_btn.pack(fill="x", padx=theme.PAD, pady=(2, theme.PAD))
 
+        st = ctk.CTkFrame(right)
+        st.pack(fill="x", padx=theme.PAD, pady=theme.PAD)
+        ctk.CTkLabel(st, text="Build self-test", font=theme.FONT_SMALL).pack(
+            anchor="w", padx=theme.PAD, pady=(theme.PAD, 0))
+        ctk.CTkLabel(st, text="checks the build end to end: model/tesseract/library load, detection + "
+                     "ocr on bundled fixtures, and an offline run. results below.",
+                     font=theme.FONT_SMALL, text_color="gray", justify="left", wraplength=300).pack(
+            anchor="w", padx=theme.PAD, pady=(0, 2))
+        self.selftest_btn = ctk.CTkButton(st, text="Run test suite", command=self._run_selftest)
+        self.selftest_btn.pack(fill="x", padx=theme.PAD, pady=(2, theme.PAD))
+
         # a textbox is borderless by default and its fill is the same charcoal as the column it sits
         # in, so without the hairline it has no edge at all and the log reads as loose text.
         self.logbox = ctk.CTkTextbox(right, height=160, font=theme.FONT_SMALL, border_width=1)
@@ -214,6 +226,9 @@ class DebugScreen(ctk.CTkFrame):
         # re-enable the scrape button on the main thread once the worker has finished.
         if not self._scraping and str(self.scrape_btn.cget("state")) == "disabled":
             self.scrape_btn.configure(state="normal", text="Run scraper")
+        # same for the self-test button.
+        if not self._selftesting and str(self.selftest_btn.cget("state")) == "disabled":
+            self.selftest_btn.configure(state="normal", text="Run test suite")
         self.after(100, self._poll)
 
     def _append_log(self, line):
@@ -347,6 +362,33 @@ class DebugScreen(ctk.CTkFrame):
                 except OSError:
                     pass
         self._append_log(f"cleared {n} debug image(s) from {paths.debug_dir()}")
+
+    def _run_selftest(self):
+        """run the build self-test on a worker thread, teeing each result into the debug log.
+        guarded against a double click; _poll re-enables the button once the flag clears."""
+        if self._selftesting:
+            return
+        # the self-test runs its own offline loop, which resets detect's tuned gates; refuse while a
+        # live run thread is alive so it can't stomp an in-flight run.
+        loop = self.app.app_state.loop
+        if loop is not None and getattr(loop, "thread", None) is not None and loop.thread.is_alive():
+            self.log("self-test skipped: stop the current run first")
+            return
+        self._selftesting = True
+        self.selftest_btn.configure(state="disabled", text="Testing…")
+        self.log("=== build self-test ===")
+        threading.Thread(target=self._selftest_worker, daemon=True).start()
+
+    def _selftest_worker(self):
+        try:
+            from src import selftest   # deferred: pulls in detect/ocr/spender, only needed on click
+            results = selftest.run_all(progress=lambda r: self.log(selftest.format_line(r)))
+            p, w, f, s = selftest.summary(results)
+            self.log(f"=== self-test: {p} passed, {w} warnings, {f} failed, {s} skipped ===")
+        except Exception as e:
+            self.log(f"self-test crashed: {type(e).__name__}: {e}")
+        finally:
+            self._selftesting = False  # _poll re-enables the button on the main thread
 
     def _run_scraper(self):
         if self._scraping:

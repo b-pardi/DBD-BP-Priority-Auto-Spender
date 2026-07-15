@@ -16,6 +16,7 @@
 - start/pause hotkey (f7) now also STARTS a run when idle, so you can set up, tab into the game, and start from there
 - new tunable detection knobs in settings: presence threshold, matcher rescue min score / margin
 - library tooltips now show the item's actual gameplay/effect text (with per-tier numbers) under the lead sentence (~93% of the library, the rest keep the lead sentence)
+- added a self-test suite for some of the core functionality and weakpoints of the pipeline
 - a metric fuck ton of ui changes:
     - fixed some ui widget bboxes not being aligned properly
     - profiles group by survivor/killer in the picker via a per-profile side tag, so the list isn't stressful to look at
@@ -30,7 +31,9 @@
     - instructions: dialed-back anti-cheat note, full settings-knob documentation (settings tab points at it), save-your-profile and first-levels-warm-up notes
     - buttons and dropdowns sitting on an oxblood panel were the exact same color as it, so they had no visible edge and the tinted ones next to them (profile delete, the dropdown arrows) read as stray oversized blocks; controls are now a lighter step of the same red. affected the profile bar, the tier list's add-tier and rule builder, the debug maintenance panel and the settings save button
     - the profile bar and the rule builder gave their controls no vertical padding, so each bar was exactly as tall as the widgets in it and they sagged a pixel or two out the bottom of it; both bars now inset their contents
-- added an FAQ
+    - added a restore all defaults button to settings in ui
+    - fixed up some instructions and settings tooltips
+- added an FAQ to repo
 
 
 ### v0.2.0-beta

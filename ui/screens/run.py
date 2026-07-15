@@ -7,6 +7,7 @@ game needed); a live, non-dry run is the only mode that actually clicks. the log
 """
 
 import queue
+import threading
 import webbrowser
 
 import customtkinter as ctk
@@ -24,6 +25,7 @@ class RunScreen(ctk.CTkFrame):
         self.app = app
         self.controller = None
         self.log_queue = queue.Queue()
+        self._selftesting = False   # a build self-test is running on a worker thread
 
         self.grid_rowconfigure(2, weight=1)
         self.grid_columnconfigure(0, weight=1)
@@ -58,19 +60,31 @@ class RunScreen(ctk.CTkFrame):
         self.stop_btn.pack(side="left", padx=(0, theme.PAD), pady=theme.PAD)
         self.status = ctk.CTkLabel(bar, text="Idle", font=theme.FONT_BODY)
         self.status.pack(side="left", padx=theme.PAD)
+        # a debug-only smoke test of the build itself (imports, model/tesseract/library load, detection
+        # + ocr on bundled fixtures, an offline loop): so a fresh build can be sanity-checked before a
+        # release, and a user can narrow down "is it the build or my setup" when reporting a problem.
+        # packed/unpacked by _refresh_test_btn on the debug toggle, like the app's Debug nav button.
+        self.test_btn = ctk.CTkButton(bar, text="🧪 Test build", width=120,
+                                      command=self._run_selftest)
 
         self.sim_var = ctk.BooleanVar(value=False)  # off by default: real (non-simulator) run
         self.sim_chk = ctk.CTkCheckBox(bar, text="Use simulator", variable=self.sim_var,
                                        command=self._sync_toggles)
         self.sim_chk.pack(side="right", padx=theme.PAD)
         self.dry_var = ctk.BooleanVar(value=bool((app.app_state.config or {}).get("dry_run", False)))
-        self.dry_chk = ctk.CTkCheckBox(bar, text="Dry run (no clicks)", variable=self.dry_var)
+        self.dry_chk = ctk.CTkCheckBox(bar, text="Dry run (no clicks)", variable=self.dry_var,
+                                       command=self._refresh_mode_note)
         self.dry_chk.pack(side="right", padx=theme.PAD)
         self.debug_var = ctk.BooleanVar(value=bool((app.app_state.config or {}).get("debug", False)))
         self.debug_chk = ctk.CTkCheckBox(bar, text="Debugging", variable=self.debug_var,
                                          command=self._on_debug_toggle)
         self.debug_chk.pack(side="right", padx=theme.PAD)
+        # loud, always-visible read of whether this run will actually touch the game: sits between the
+        # start/stop group and the toggles it describes, and flips color the moment dry-run/sim change.
+        self.mode_note = ctk.CTkLabel(bar, text="", font=("Segoe UI", 12, "bold"))
+        self.mode_note.pack(side="right", padx=theme.PAD * 2)
         self._sync_toggles()
+        self._refresh_test_btn()
 
         ctk.CTkLabel(
             self, font=theme.FONT_SMALL, justify="left",
@@ -94,6 +108,18 @@ class RunScreen(ctk.CTkFrame):
             self.dry_chk.configure(state="disabled")
         else:
             self.dry_chk.configure(state="normal")
+        self._refresh_mode_note()
+
+    def _refresh_mode_note(self):
+        """flip the bar's mode note between the safe states (nothing is bought) and a live warning,
+        so it's never a surprise which mode Start will run in. sim implies dry, so it's checked first."""
+        if self.sim_var.get():
+            text, color = "SIMULATOR — nothing is clicked or bought", theme.ACCENT_BRIGHT
+        elif self.dry_var.get():
+            text, color = "DRY RUN — nothing is clicked or bought", theme.ACCENT_BRIGHT
+        else:
+            text, color = "⚠ LIVE — will click and spend in-game", theme.DANGER_HOVER
+        self.mode_note.configure(text=text, text_color=color)
 
     def _on_debug_toggle(self):
         # write through immediately (like Settings' toggle) so the Debug nav button appears right
@@ -101,10 +127,21 @@ class RunScreen(ctk.CTkFrame):
         if self.app.app_state.config is not None:
             self.app.app_state.config["debug"] = bool(self.debug_var.get())
         self.app.refresh_nav()
+        self._refresh_test_btn()
+
+    def _refresh_test_btn(self):
+        # the build self-test is a debugging aid, so it rides the same gate as the Debug screen: shown
+        # only while debugging is on. re-pack appends it after the status label on the left group.
+        if self.debug_var.get():
+            if not self.test_btn.winfo_manager():
+                self.test_btn.pack(side="left", padx=theme.PAD, pady=theme.PAD)
+        elif self.test_btn.winfo_manager():
+            self.test_btn.pack_forget()
 
     def on_show(self):
         # picks up a debug change made on the Settings screen since this screen was built.
         self.debug_var.set(bool((self.app.app_state.config or {}).get("debug", False)))
+        self._refresh_test_btn()
 
     def _ensure_controller(self):
         if self.controller is None:
@@ -128,6 +165,28 @@ class RunScreen(ctk.CTkFrame):
     def _stop(self):
         if self.controller is not None:
             self.controller.stop()
+
+    def _run_selftest(self):
+        """run the build self-test on a worker thread, teeing each result into the run log (the same
+        queue the run loop uses). guarded so a second click while one is running is a no-op; the button
+        is re-enabled by _poll once the flag clears (tk is main-thread only)."""
+        if self._selftesting:
+            return
+        self._selftesting = True
+        self.test_btn.configure(state="disabled", text="Testing…")
+        self.log_queue.put("=== build self-test ===")
+        threading.Thread(target=self._selftest_worker, daemon=True).start()
+
+    def _selftest_worker(self):
+        try:
+            from src import selftest   # deferred: pulls in detect/ocr/spender, only needed on click
+            results = selftest.run_all(progress=lambda r: self.log_queue.put(selftest.format_line(r)))
+            p, w, f, s = selftest.summary(results)
+            self.log_queue.put(f"=== self-test: {p} passed, {w} warnings, {f} failed, {s} skipped ===")
+        except Exception as e:
+            self.log_queue.put(f"self-test crashed: {type(e).__name__}: {e}")
+        finally:
+            self._selftesting = False  # _poll re-enables the button on the main thread
 
     def _poll(self):
         try:
@@ -161,4 +220,10 @@ class RunScreen(ctk.CTkFrame):
         else:
             self.sim_chk.configure(state="normal")
             self._sync_toggles()  # restores dry_chk per the sim setting
+        # self-test button: "Testing…" while its own worker runs, disabled during a live run (its
+        # offline run resets detect's tuned gates, so it must not fire mid-run), else ready.
+        if self._selftesting:
+            self.test_btn.configure(state="disabled", text="Testing…")
+        else:
+            self.test_btn.configure(state=("disabled" if active else "normal"), text="🧪 Test build")
         self.after(150, self._poll)

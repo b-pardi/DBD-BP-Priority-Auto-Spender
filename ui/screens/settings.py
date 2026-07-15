@@ -12,7 +12,7 @@ import tkinter.messagebox as messagebox
 
 import customtkinter as ctk
 
-from src import detect, ocr, spender
+from src import defaults, detect, ocr, spender
 from src.version import __version__
 
 from .. import config_io, theme
@@ -83,7 +83,9 @@ class SettingsScreen(ctk.CTkFrame):
             row=2, column=0, columnspan=3, sticky="w", pady=4)
 
         # --- hotkeys ---
-        g = self._group("Hotkeys")
+        # global hotkeys are wired once when the run screen builds its controller (see
+        # run_controller.py), not re-read live, so a rebind needs an app restart to take effect.
+        g = self._group("Hotkeys", "rebound a key? restart the app for it to take effect")
         ctk.CTkLabel(g, text="Start / pause hotkey", anchor="w", width=LABEL_W).grid(
             row=0, column=0, sticky="w", pady=4)
         self.start_btn = ctk.CTkButton(
@@ -259,10 +261,13 @@ class SettingsScreen(ctk.CTkFrame):
             font=theme.FONT_SMALL, text_color="gray", justify="left", anchor="w",
         ).pack(fill="x", anchor="w", padx=theme.PAD, pady=theme.PAD)
 
-        # pinned Save bar, always reachable no matter how far the body is scrolled.
+        # pinned Save bar, always reachable no matter how far the body is scrolled. "Restore defaults"
+        # sits on the far side so it can't be fat-fingered in place of Save.
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.grid(row=2, column=0, sticky="ew", padx=theme.PAD, pady=theme.PAD)
         ctk.CTkButton(bar, text="Save settings", command=self._save).pack(side="left")
+        ctk.CTkButton(bar, text="Restore defaults", command=self._restore_defaults,
+                      fg_color=theme.BG_RAISED, hover_color=theme.BLOOD_HI).pack(side="right")
 
     def _group(self, title, subtitle=None):
         """a titled card in the scroll body; returns the inner frame to grid controls into."""
@@ -378,3 +383,29 @@ class SettingsScreen(ctk.CTkFrame):
             return
         self.app.app_state.config = cfg
         self.app.refresh_nav()
+
+    def _restore_defaults(self):
+        """reset every settings-screen knob to defaults.DEFAULT_SETTINGS, leaving priority profiles
+        untouched. mutates + persists the config, then rebuilds this screen so every widget
+        repopulates from the defaulted config rather than duplicating the population logic here."""
+        if not messagebox.askyesno(
+                "restore defaults",
+                "Reset all settings to their defaults?\n\n"
+                "This affects only the knobs on this screen (display, hotkeys, detection, match "
+                "pool, spend order, timing, stops & prestige). Your priority profiles are left "
+                "untouched."):
+            return
+        cfg = dict(self.app.app_state.config or {})
+        cfg.update(defaults.DEFAULT_SETTINGS)  # settings keys only; profiles/priorities untouched
+        try:
+            config_io.save(cfg)
+        except ValueError as e:
+            messagebox.showerror("config error", str(e))
+            return
+        self.app.app_state.config = cfg
+        # the settings that take effect through a module-level toggle (not at screen build) need
+        # applying by hand, same as their _on_* handlers do.
+        ctk.set_widget_scaling(cfg["ui_scale"])
+        tooltip.set_enabled(cfg["show_tooltips"])
+        self.app.refresh_nav()        # debug defaults off -> drop the Debug nav button
+        self.app.rebuild_settings()   # repopulate every widget from the defaulted config

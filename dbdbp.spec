@@ -41,6 +41,8 @@ for pat in _dll_pats:
 datas = []
 datas += [("config/priority.json", "config")]                  # seed, ensure_user_dirs copies it to %APPDATA%
 datas += [("data/models/glyph_encoder.onnx", "data/models")]   # cnn matcher weights (detect.CNN_ONNX)
+# curated q90 fixtures for the debug self-test (src.selftest.fixtures_dir -> _MEIPASS/data/selftest).
+datas += [(f, "data/selftest") for f in glob.glob("data/selftest/*.jpg")]
 datas += [("ui/assets/icon.ico", "ui/assets"), ("ui/assets/icon.png", "ui/assets")]
 datas += collect_data_files("customtkinter")                   # ctk loads theme json at runtime
 if os.path.isfile(os.path.join(SHARE_TESS, "eng.traineddata")):

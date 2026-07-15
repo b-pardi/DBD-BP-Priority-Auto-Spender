@@ -182,6 +182,18 @@ class App(ctk.CTk):
             if self._active == "debug":
                 self.show("priorities")  # don't strand the user on a now-hidden screen
 
+    def rebuild_settings(self):
+        """tear down and rebuild the Settings screen so it repopulates every widget straight from the
+        current config. used by "Restore defaults", which mutates the config then wants the screen to
+        reflect it without duplicating SettingsScreen's widget-population logic."""
+        old = self.screens.get("settings")
+        if old is not None:
+            old.destroy()
+        scr = SettingsScreen(self.content, self)
+        scr.grid(row=0, column=0, sticky="nsew")
+        self.screens["settings"] = scr
+        self.show("settings")
+
     def _build_screens(self):
         self.screens["priorities"] = PrioritiesScreen(self.content, self)
         self.screens["settings"] = SettingsScreen(self.content, self)

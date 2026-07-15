@@ -5,7 +5,7 @@ BUMP THIS before tagging a new release, and keep it equal to the release tag min
 (tag v0.1.0-alpha -> "0.1.0-alpha")
 """
 
-__version__ = "0.3.0-beta"
+__version__ = "0.3.1-beta"
 
 # the repo the updater checks for new releases. owner/name form used by the github api.
 REPO = "b-pardi/DBD-BP-Priority-Auto-Spender"

@@ -311,18 +311,22 @@ def find_ok_button(frame, resolution=None):
 
 def draw_ocr_regions(frame, resolution=None):
     """bgr copy of frame with every fixed read region drawn as a labeled rectangle, for the debug
-    'show ocr regions' overlay so a new resolution can be checked at a glance (this whole 16:9 bp bug
-    was one crop drifting off the number). top-bar reads use their edge-anchored px boxes, the search
-    zones / tooltip / ok their frame fractions, and the cursor park spot a dot. bgr colors."""
+    'ocr regions' overlay so a new resolution can be checked at a glance (this whole 16:9 bp bug was
+    one crop drifting off the number). top-bar reads use their edge-anchored px boxes, the search
+    zones / tooltip / ok their frame fractions, the cursor park spot a dot. line/label sizes scale
+    with frame width so they survive the debug view's fit zoom (~26% on a 3440 frame). bgr colors."""
     resolution = resolution or Resolution.from_frame(frame)
     h, w = frame.shape[:2]
     out = frame.copy()
+    t = max(2, round(w / 400))          # box thickness, heavy enough to read after the fit downscale
+    fs = max(0.6, w / 1600.0)           # label font scale
+    dy = round(10 * fs)
 
     def box(x0, y0, x1, y1, label, color):
-        cv2.rectangle(out, (x0, y0), (x1, y1), color, 2)
-        ty = y0 - 6 if y0 > 18 else y1 + 16
-        cv2.putText(out, label, (x0, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(out, label, (x0, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+        cv2.rectangle(out, (x0, y0), (x1, y1), color, t)
+        ty = y0 - dy if y0 > 3 * dy else y1 + 3 * dy
+        cv2.putText(out, label, (x0, ty), cv2.FONT_HERSHEY_SIMPLEX, fs, (0, 0, 0), t + 3, cv2.LINE_AA)
+        cv2.putText(out, label, (x0, ty), cv2.FONT_HERSHEY_SIMPLEX, fs, color, max(1, t - 2), cv2.LINE_AA)
 
     for r, label, color in ((resolution.bp_region_px(), "bp", (80, 220, 80)),
                             (resolution.level_region_px(), "level", (80, 200, 255)),
@@ -334,8 +338,9 @@ def draw_ocr_regions(frame, resolution=None):
                               (resolution.OK_REGION, "rewards ok", (200, 120, 190))):
         box(int(reg[0] * w), int(reg[1] * h), int(reg[2] * w), int(reg[3] * h), label, color)
     px, py = int(resolution.PARK_XY[0] * w), int(resolution.PARK_XY[1] * h)
-    cv2.circle(out, (px, py), 8, (60, 60, 220), -1)
-    cv2.putText(out, "park", (px + 12, py + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 220), 1, cv2.LINE_AA)
+    cv2.circle(out, (px, py), t * 2, (60, 60, 220), -1)
+    cv2.putText(out, "park", (px + 3 * t, py + dy), cv2.FONT_HERSHEY_SIMPLEX, fs, (60, 60, 220),
+                max(1, t - 2), cv2.LINE_AA)
     return out
 
 

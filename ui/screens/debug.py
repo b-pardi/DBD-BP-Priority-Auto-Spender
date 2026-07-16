@@ -106,6 +106,12 @@ class DebugScreen(ctk.CTkFrame):
         for text, color in (("available", "#00E000"), ("bought", "#FF3B3B"), ("entity", "#FF5CFF")):
             ctk.CTkLabel(toolbar, text=text, font=theme.FONT_SMALL, text_color=color).pack(
                 side="left", padx=3)
+        # overlay the ocr read regions on every shown frame (on by default so a run's frames show
+        # where bp/level/prestige/anchors are read); drawn at render time so it also toggles live.
+        self.show_regions_var = ctk.BooleanVar(value=True)
+        ctk.CTkCheckBox(toolbar, text="OCR regions", variable=self.show_regions_var,
+                        font=theme.FONT_SMALL, command=self._rerender).pack(
+            side="left", padx=(theme.PAD, 2))
         ctk.CTkButton(toolbar, text="Save frame", command=self._save_frame).pack(
             side="right")
         # ocr'd run status (prestige / bloodweb level / bp), fed by the run loop each live scan when a
@@ -259,12 +265,20 @@ class DebugScreen(ctk.CTkFrame):
             text=f"OCR: prestige {fmt(status.get('prestige'))} · "
                  f"level {fmt(status.get('level'))} · bp {fmt(status.get('bp'))}")
 
+    def _rerender(self):
+        """re-render the current frame after a view toggle (e.g. the OCR-regions checkbox)."""
+        if self._last_frame is not None:
+            self._render_frame(self._last_frame, keep=False)
+
     def _render_frame(self, bgr, keep=True):
         """render bgr at the current zoom. keep=True (a fresh frame off the queue) also stashes
         it full-res as self._last_frame, so zoom/save can re-render or write it without waiting
         on the next detector tick."""
         if keep:
             self._last_frame = bgr
+        if self.show_regions_var.get():
+            from src import ocr  # deferred like the rest; draw on a copy so _last_frame stays clean
+            bgr = ocr.draw_ocr_regions(bgr)
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         pil = Image.fromarray(rgb)
         w, h = pil.size
@@ -380,21 +394,23 @@ class DebugScreen(ctk.CTkFrame):
         self._append_log(f"cleared {n} debug image(s) from {paths.debug_dir()}")
 
     def _show_ocr_regions(self):
-        """grab the screen and overlay the ocr read regions, so a user can confirm each box lands on
-        the text it reads (the diagnostic for the 16:9 bp-misread class of bug). guarded against a
-        double click; _poll re-enables the button once the flag clears."""
+        """grab a fresh screen frame to inspect the ocr read regions on (the diagnostic for the 16:9
+        bp-misread class of bug); the render-time overlay draws the boxes. useful when idle, since a
+        run already streams frames with the overlay on. guarded against a double click; _poll
+        re-enables the button once the flag clears."""
         if self._grabbing_regions:
             return
+        self.show_regions_var.set(True)  # main thread: make sure the overlay is on so the boxes show
         self._grabbing_regions = True
         self.ocr_regions_btn.configure(state="disabled", text="Grabbing…")
         threading.Thread(target=self._ocr_regions_worker, daemon=True).start()
 
     def _ocr_regions_worker(self):
         try:
-            from src import capture, ocr  # deferred: capture pulls mss, only needed on click
+            from src import capture  # deferred: capture pulls mss, only needed on click
             frame = capture.grab_bloodweb()
-            self.push_frame(ocr.draw_ocr_regions(frame), frame)
-            self.log(f"ocr regions overlaid on a {frame.shape[1]}x{frame.shape[0]} grab")
+            self.push_frame(frame, frame)  # render overlays the ocr regions on top
+            self.log(f"grabbed a {frame.shape[1]}x{frame.shape[0]} frame; ocr regions overlaid")
         except Exception as e:
             self.log(f"ocr region grab failed: {type(e).__name__}: {e}")
         finally:

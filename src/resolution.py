@@ -1,11 +1,13 @@
 """single source of truth for every resolution-dependent constant in the detect/ocr pipeline.
 
-everything here was hard-tuned against one 3440x1440 capture: find_circles' rmin/rmax, and the
-fractional ui regions ocr.py reads (bp total, web-bbox anchor zones, tooltip park spot). Resolution
-centralizes them off that baseline so a different capture can scale the pixel sizes (rmin/rmax by
-h/1440, since node size tracks vertical resolution more than width, aspect ratio varies e.g.
-ultrawide) while the fractional regions stay put (a fraction of frame is already
-resolution-independent, which is why they were expressed that way).
+everything here was hard-tuned against one 3440x1440 capture: find_circles' rmin/rmax and the ui
+regions ocr.py reads. rmin/rmax scale by h/1440 (node size tracks height, not width). web-relative
+zones (anchors, tooltip, park) stay frame fractions since the web is centered. but the top-bar reads
+(bp / level / prestige crest) are EDGE-anchored in dbd's hud, so a width-fraction crop only lands
+right at the baseline aspect ratio: on 16:9 the bp crop slid off the right-aligned number and read
+only its trailing digits. those three are baseline px offsets from their anchor edge (scaled by
+height, resolved by *_region_px); at the baseline they equal the old fractional crops, so ultrawide
+is untouched.
 
 GLYPH_SIZE (detect.py / scraper.py) is deliberately not here: it's a fixed template size the matcher
 compares against, not a screen measurement, so it never scales.
@@ -28,12 +30,20 @@ class Resolution:
     w: int = BASELINE_W
     h: int = BASELINE_H
 
-    # fractional ui regions (fx0, fy0, fx1, fy1) or (fx, fy), stable across resolutions since a
-    # fraction of frame already is the resolution-independent form. centralized here so ocr.py and
-    # detect's debug cockpit read one definition instead of each keeping their own literal.
-    BP_REGION = (0.8765, 0.0472, 0.9215, 0.0764)           # ocr.read_bp: top-bar bp total
-    LEVEL_REGION = (0.145, 0.065, 0.245, 0.088)            # ocr.read_bloodweb_level: the "BLOODWEB LEVEL n" strip below the name
-    PRESTIGE_CREST_REGION = (0.113, 0.045, 0.142, 0.088)  # ocr.read_prestige_level: the crest digit left of the name (empty crest = prestige 0)
+    # top-bar reads: baseline px offsets from an anchor edge (scaled by height in *_region_px), NOT
+    # width fractions. left-anchored give (x0, x1) px from the LEFT edge; bp is (left, right) px from
+    # the RIGHT edge (the counter is right-aligned, grows leftward with more digits). y is a fraction
+    # of height. at the baseline these equal the old fractions (LEVEL 0.145/0.245, CREST 0.113/0.142,
+    # BP 0.8765/0.9215 of w 3440), so ultrawide reads exactly as before.
+    LEVEL_X = (499, 843)              # ocr.read_bloodweb_level: "BLOODWEB LEVEL n" strip below the name
+    LEVEL_Y = (0.065, 0.088)
+    PRESTIGE_CREST_X = (389, 489)    # ocr.read_prestige_level: crest digit left of the name (empty crest = prestige 0)
+    PRESTIGE_CREST_Y = (0.045, 0.088)
+    BP_X_FROM_RIGHT = (402, 240)     # ocr.read_bp: top-bar bp total
+    BP_Y = (0.0472, 0.0764)
+
+    # fractional ui regions (fx0, fy0, fx1, fy1) or (fx, fy): web-centered or generous zones, close
+    # enough as a fraction of frame. centralized here so ocr.py and detect's debug cockpit share them.
     PRESTIGE_TOOLTIP_REGION = (0.29, 0.42, 0.55, 0.58)    # ocr.read_center_hover_text: where the hovered center's "PRESTIGE LEVEL n" tooltip lands
     OK_REGION = (0.87, 0.81, 0.96, 0.89)                  # ocr.find_ok_button: the REWARDS UNLOCKED screen's OK button
     OK_CLICK_XY = (0.910, 0.852)                          # ok button center, clicked to dismiss the rewards screen
@@ -74,6 +84,28 @@ class Resolution:
     def rmax(self):
         """find_circles' maximum node radius in this Resolution's pixels."""
         return round(100 * self.scale)
+
+    def _left_region_px(self, xoff, yfrac):
+        """a left-anchored top-bar crop {x0,y0,x1,y1}: x offsets are baseline px from the LEFT edge
+        scaled by height, y is a fraction of height."""
+        return {'x0': round(xoff[0] * self.scale), 'y0': round(yfrac[0] * self.h),
+                'x1': round(xoff[1] * self.scale), 'y1': round(yfrac[1] * self.h)}
+
+    def level_region_px(self):
+        """read_bloodweb_level's crop box in this frame's px."""
+        return self._left_region_px(self.LEVEL_X, self.LEVEL_Y)
+
+    def prestige_crest_region_px(self):
+        """read_prestige_level's crop box in this frame's px."""
+        return self._left_region_px(self.PRESTIGE_CREST_X, self.PRESTIGE_CREST_Y)
+
+    def bp_region_px(self):
+        """read_bp's crop box in this frame's px, right-anchored (x = width - baseline offset scaled by
+        height) so it tracks the right-aligned counter on any aspect ratio instead of drifting off it."""
+        return {'x0': self.w - round(self.BP_X_FROM_RIGHT[0] * self.scale),
+                'y0': round(self.BP_Y[0] * self.h),
+                'x1': self.w - round(self.BP_X_FROM_RIGHT[1] * self.scale),
+                'y1': round(self.BP_Y[1] * self.h)}
 
     def web_bbox_fallback_px(self):
         """WEB_BBOX_FALLBACK in this Resolution's own pixels, {'x0','y0','xf','yf'}

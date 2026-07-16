@@ -22,9 +22,8 @@ from .node import normalize_name
 from .ocr_runtime import get_tesserocr
 from .resolution import Resolution
 
-# bp value sits right anchored in the top bar. the fraction itself lives on Resolution
-# (Resolution.BP_REGION) since it is one of the frame-fraction regions centralized there; read_bp
-# resolves resolution.BP_REGION off the frame it is given.
+# bp value sits right anchored in the top bar; read_bp resolves resolution.bp_region_px() (an
+# edge-anchored crop, see Resolution) off the frame it is given.
 BP_THRESH = 150 # binarize cutoff that keeps only the bright digits
 
 HOVER_DELAY_S = 0.1 # wait after move_to for dbd's tooltip to fade in
@@ -201,11 +200,8 @@ def read_bp(frame, resolution=None):
     if frame is None:
         return None
     resolution = resolution or Resolution.from_frame(frame)
-    h, w = frame.shape[:2]
-    bp_region = resolution.BP_REGION
-    x0, y0, x1, y1 = (int(bp_region[0] * w), int(bp_region[1] * h),
-                      int(bp_region[2] * w), int(bp_region[3] * h))
-    g = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    b = resolution.bp_region_px()
+    g = cv2.cvtColor(frame[b['y0']:b['y1'], b['x0']:b['x1']], cv2.COLOR_BGR2GRAY)
     g = cv2.resize(g, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC) # upscale, tesseract likes big glyphs
     _, th = cv2.threshold(g, BP_THRESH, 255, cv2.THRESH_BINARY)
     api = _api(get_tesserocr().PSM.SINGLE_LINE, "0123456789 ")
@@ -238,15 +234,12 @@ def read_bloodweb_level(frame, resolution=None):
     reads the whole 'BLOODWEB LEVEL n' line and takes the trailing number, so a garbled 'BLOODWEB'
     doesn't matter as long as the digits read. backs the level goal-stop and the prestige-ready
     trigger (level 50 = the web the prestige star replaces). frame is the full bgr grab (h, w, 3).
-    resolution (default Resolution.from_frame(frame)) supplies LEVEL_REGION."""
+    resolution (default Resolution.from_frame(frame)) supplies the crop (level_region_px)."""
     if frame is None:
         return None
     resolution = resolution or Resolution.from_frame(frame)
-    h, w = frame.shape[:2]
-    region = resolution.LEVEL_REGION
-    x0, y0, x1, y1 = (int(region[0] * w), int(region[1] * h),
-                      int(region[2] * w), int(region[3] * h))
-    g = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    r = resolution.level_region_px()
+    g = cv2.cvtColor(frame[r['y0']:r['y1'], r['x0']:r['x1']], cv2.COLOR_BGR2GRAY)
     g = cv2.resize(g, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
     _, th = cv2.threshold(g, 150, 255, cv2.THRESH_BINARY)  # keep the bright text
     api = _api(get_tesserocr().PSM.SINGLE_LINE)
@@ -265,15 +258,12 @@ def read_prestige_level(frame, resolution=None):
     verified against the prestige 0/1 fixtures; higher and two-digit prestige are unproven, so this is
     the best-effort read the user opted into (used for the prestige goal-stop and the debug readout,
     never to decide whether to prestige, which keys off level 50 + a hover confirm instead).
-    frame is the full bgr grab (h, w, 3). resolution supplies PRESTIGE_CREST_REGION."""
+    frame is the full bgr grab (h, w, 3). resolution supplies the crop (prestige_crest_region_px)."""
     if frame is None:
         return None
     resolution = resolution or Resolution.from_frame(frame)
-    h, w = frame.shape[:2]
-    region = resolution.PRESTIGE_CREST_REGION
-    x0, y0, x1, y1 = (int(region[0] * w), int(region[1] * h),
-                      int(region[2] * w), int(region[3] * h))
-    g = cv2.cvtColor(frame[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    r = resolution.prestige_crest_region_px()
+    g = cv2.cvtColor(frame[r['y0']:r['y1'], r['x0']:r['x1']], cv2.COLOR_BGR2GRAY)
     g = cv2.resize(g, None, fx=8, fy=8, interpolation=cv2.INTER_CUBIC)
     g = cv2.GaussianBlur(g, (3, 3), 0)
     _, th = cv2.threshold(g, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -317,6 +307,36 @@ def find_ok_button(frame, resolution=None):
         cx, cy = resolution.OK_CLICK_XY
         return int(cx * w), int(cy * h)
     return None
+
+
+def draw_ocr_regions(frame, resolution=None):
+    """bgr copy of frame with every fixed read region drawn as a labeled rectangle, for the debug
+    'show ocr regions' overlay so a new resolution can be checked at a glance (this whole 16:9 bp bug
+    was one crop drifting off the number). top-bar reads use their edge-anchored px boxes, the search
+    zones / tooltip / ok their frame fractions, and the cursor park spot a dot. bgr colors."""
+    resolution = resolution or Resolution.from_frame(frame)
+    h, w = frame.shape[:2]
+    out = frame.copy()
+
+    def box(x0, y0, x1, y1, label, color):
+        cv2.rectangle(out, (x0, y0), (x1, y1), color, 2)
+        ty = y0 - 6 if y0 > 18 else y1 + 16
+        cv2.putText(out, label, (x0, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 3, cv2.LINE_AA)
+        cv2.putText(out, label, (x0, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 1, cv2.LINE_AA)
+
+    for r, label, color in ((resolution.bp_region_px(), "bp", (80, 220, 80)),
+                            (resolution.level_region_px(), "level", (80, 200, 255)),
+                            (resolution.prestige_crest_region_px(), "prestige", (80, 200, 255))):
+        box(r['x0'], r['y0'], r['x1'], r['y1'], label, color)
+    for reg, label, color in ((resolution.ANCHOR_TOP_ZONE, "anchor: perks/spend", (210, 160, 60)),
+                              (resolution.ANCHOR_BL_ZONE, "anchor: back", (210, 160, 60)),
+                              (resolution.PRESTIGE_TOOLTIP_REGION, "prestige tooltip", (200, 120, 190)),
+                              (resolution.OK_REGION, "rewards ok", (200, 120, 190))):
+        box(int(reg[0] * w), int(reg[1] * h), int(reg[2] * w), int(reg[3] * h), label, color)
+    px, py = int(resolution.PARK_XY[0] * w), int(resolution.PARK_XY[1] * h)
+    cv2.circle(out, (px, py), 8, (60, 60, 220), -1)
+    cv2.putText(out, "park", (px + 12, py + 6), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (60, 60, 220), 1, cv2.LINE_AA)
+    return out
 
 
 def read_tooltip(tooltip_crop_bgr):

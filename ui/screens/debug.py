@@ -42,6 +42,7 @@ class DebugScreen(ctk.CTkFrame):
         self._tk_img = None        # keep a ref so the canvas PhotoImage isn't garbage-collected
         self._scraping = False
         self._selftesting = False  # a build self-test is running on a worker thread
+        self._grabbing_regions = False  # an ocr-regions grab is running on a worker thread
         self._last_frame = None    # newest annotated bgr frame, kept full-res for zoom/save
         self._last_raw = None      # the clean grab behind it (None until a run supplies one)
         # zoom is always a real percent of native. _fit=True re-derives that percent to fit the panel
@@ -169,6 +170,18 @@ class DebugScreen(ctk.CTkFrame):
         ctk.CTkButton(cache, text="Clear cache", command=self._clear_cache).pack(
             fill="x", padx=theme.PAD, pady=(2, theme.PAD))
 
+        reg = ctk.CTkFrame(right)
+        reg.pack(fill="x", padx=theme.PAD, pady=theme.PAD)
+        ctk.CTkLabel(reg, text="OCR regions", font=theme.FONT_SMALL).pack(
+            anchor="w", padx=theme.PAD, pady=(theme.PAD, 0))
+        ctk.CTkLabel(reg, text="grabs your screen and draws where each ocr read looks (bp, level, "
+                     "prestige, anchors). check the boxes land on the right text for your resolution.",
+                     font=theme.FONT_SMALL, text_color="gray", justify="left", wraplength=300).pack(
+            anchor="w", padx=theme.PAD, pady=(0, 2))
+        self.ocr_regions_btn = ctk.CTkButton(
+            reg, text="Show OCR regions", command=self._show_ocr_regions)
+        self.ocr_regions_btn.pack(fill="x", padx=theme.PAD, pady=(2, theme.PAD))
+
         dbg = ctk.CTkFrame(right)
         dbg.pack(fill="x", padx=theme.PAD, pady=theme.PAD)
         ctk.CTkLabel(dbg, text="Debug output (saved overlays)", font=theme.FONT_SMALL).pack(
@@ -229,6 +242,9 @@ class DebugScreen(ctk.CTkFrame):
         # same for the self-test button.
         if not self._selftesting and str(self.selftest_btn.cget("state")) == "disabled":
             self.selftest_btn.configure(state="normal", text="Run test suite")
+        # same for the ocr-regions grab button.
+        if not self._grabbing_regions and str(self.ocr_regions_btn.cget("state")) == "disabled":
+            self.ocr_regions_btn.configure(state="normal", text="Show OCR regions")
         self.after(100, self._poll)
 
     def _append_log(self, line):
@@ -362,6 +378,27 @@ class DebugScreen(ctk.CTkFrame):
                 except OSError:
                     pass
         self._append_log(f"cleared {n} debug image(s) from {paths.debug_dir()}")
+
+    def _show_ocr_regions(self):
+        """grab the screen and overlay the ocr read regions, so a user can confirm each box lands on
+        the text it reads (the diagnostic for the 16:9 bp-misread class of bug). guarded against a
+        double click; _poll re-enables the button once the flag clears."""
+        if self._grabbing_regions:
+            return
+        self._grabbing_regions = True
+        self.ocr_regions_btn.configure(state="disabled", text="Grabbing…")
+        threading.Thread(target=self._ocr_regions_worker, daemon=True).start()
+
+    def _ocr_regions_worker(self):
+        try:
+            from src import capture, ocr  # deferred: capture pulls mss, only needed on click
+            frame = capture.grab_bloodweb()
+            self.push_frame(ocr.draw_ocr_regions(frame), frame)
+            self.log(f"ocr regions overlaid on a {frame.shape[1]}x{frame.shape[0]} grab")
+        except Exception as e:
+            self.log(f"ocr region grab failed: {type(e).__name__}: {e}")
+        finally:
+            self._grabbing_regions = False  # _poll re-enables the button on the main thread
 
     def _run_selftest(self):
         """run the build self-test on a worker thread, teeing each result into the debug log.

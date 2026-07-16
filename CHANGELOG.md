@@ -1,5 +1,8 @@
 ## Changelog
 
+### v0.3.1-beta
+- fixed ocr bloodpoint read bug on 16x9 monitors
+
 ### v0.3.0-beta
 - fixed wiki scraper to grab new chapter items handling weird wiki quirks with those
     - note also implicitly fixes `Toothy Torte` only showing as `10th anniversary`

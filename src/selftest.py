@@ -47,6 +47,10 @@ GOLD = {
 LEVELS = {"web-L1.jpg": 1, "web-L30.jpg": 30, "web-L50.jpg": 50}
 PRESTIGE_READY = "web-prestige-ready.jpg"      # prestige star showing; read_prestige_level reads a number
 PRESTIGE_CONFIRM = "web-prestige-confirm.jpg"  # post-click screen; find_ok_button locates the OK button
+# a real 2560x1440 (16:9) grab: the aspect that broke the edge-anchored top-bar reads (fraction crops
+# read only the trailing bp digits + a bogus 4, wrong level, prestige 0). ground truth off the frame.
+ASPECT_FIXTURE = "web-16x9.jpg"
+ASPECT_TRUTH = {"bp": 414162, "level": 50, "prestige": 100}
 
 
 def fixtures_dir():
@@ -176,6 +180,31 @@ def check_match_bank():
     return "pass", f"{kind} bank built ({n} rows)"
 
 
+def check_resolution_anchoring():
+    """fixture-free guard on the fix for the 16:9 bp bug: the top-bar reads must be EDGE-anchored, not
+    width fractions. across two widths at one height, bp must stay a fixed px from the RIGHT edge and
+    level/prestige a fixed px from the LEFT, with every crop in bounds. a revert to width fractions
+    (the bug) drifts the offsets and fails here without needing a capture."""
+    base = Resolution(w=3440, h=1440)
+    wide = Resolution(w=2560, h=1440)   # same height, 16:9: the aspect that broke the reads
+    bad = []
+    for r in (base, wide):
+        b = r.bp_region_px()
+        if not (0 <= b['x0'] < b['x1'] <= r.w and 0 <= b['y0'] < b['y1'] <= r.h):
+            bad.append(f"bp crop out of bounds at w={r.w}")
+    if (base.w - base.bp_region_px()['x1']) != (wide.w - wide.bp_region_px()['x1']):
+        bad.append("bp drifts with width (not right-anchored)")
+    for name, meth in (("level", "level_region_px"), ("prestige", "prestige_crest_region_px")):
+        b0, b1 = getattr(base, meth)(), getattr(wide, meth)()
+        if (b0['x0'], b0['x1']) != (b1['x0'], b1['x1']):
+            bad.append(f"{name} drifts with width (not left-anchored)")
+        if not (0 <= b1['x0'] < b1['x1'] <= wide.w):
+            bad.append(f"{name} crop out of bounds at 16:9")
+    if bad:
+        return "fail", "; ".join(bad)
+    return "pass", "bp right-anchored, level/prestige left-anchored across 3440/2560 @1440"
+
+
 # ------------------------------------------------------------------- functional tier
 
 def _have_fixtures():
@@ -256,6 +285,25 @@ def check_ocr_bp():
     return "pass", f"bloodpoint read = {bp:,}"
 
 
+def check_ocr_aspect():
+    """the regression test for the 16:9 bp-misread: bp/level/prestige off a real 2560x1440 grab vs
+    ground truth. before the edge-anchored fix this read only the trailing bp digits (+ a bogus 4), a
+    wrong level, and prestige 0; complements check_resolution_anchoring (which only proves the crops
+    are edge-anchored, not that they land on the digits)."""
+    if not _have_fixtures():
+        return "skip", "curated fixtures not bundled (dev-only from source)"
+    img = cv2.imread(str(fixtures_dir() / ASPECT_FIXTURE))
+    if img is None:
+        return "skip", f"{ASPECT_FIXTURE} not bundled"
+    res = Resolution.from_frame(img)
+    got = {"bp": ocr.read_bp(img, res), "level": ocr.read_bloodweb_level(img, res),
+           "prestige": ocr.read_prestige_level(img, res)}
+    bad = [f"{k} {got[k]}!={v}" for k, v in ASPECT_TRUTH.items() if got[k] != v]
+    if bad:
+        return "fail", f"16:9 (2560x1440) reads wrong: {', '.join(bad)}"
+    return "pass", f"16:9 reads correct: bp={got['bp']:,} level={got['level']} prestige={got['prestige']}"
+
+
 def check_sim_run():
     """drive the REAL spender loop over the offline simulator: a forced node the priorities pick,
     zeroed timing, dry-run (no clicks), bounded to a few levels. proves source -> decide -> buy ->
@@ -328,10 +376,12 @@ CHECKS = [
     ("tesseract ocr", check_tesseract),
     ("cnn model", check_cnn_model),
     ("match bank", check_match_bank),
+    ("resolution anchoring", check_resolution_anchoring),
     ("detection (gold)", check_detection),
     ("ocr: levels", check_ocr_levels),
     ("ocr: prestige", check_ocr_prestige),
     ("ocr: bloodpoints", check_ocr_bp),
+    ("ocr: 16:9 reads", check_ocr_aspect),
     ("offline sim run", check_sim_run),
 ]
 

@@ -455,7 +455,35 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
     index.sort(key=lambda row: (row["category"], row["key"]))
     index_path.parent.mkdir(parents=True, exist_ok=True)
     index_path.write_text(json.dumps(index, indent=2, ensure_ascii=False), encoding="utf-8")
+    if limit is None:  # a limited dev scrape indexes a slice; pruning against it would eat the library
+        _p("pruning stale sprites")
+        prune_orphan_sprites(index, categories, out_dir, index_path)
     return index, skipped
+
+
+def prune_orphan_sprites(index, categories, out_dir: Path, index_path: Path):
+    """delete sprites in the scraped categories that the fresh index no longer references.
+    a re-scrape can re-key an icon (identity/rename fixes), and the orphaned file is worse than dead
+    weight: anything still holding the old rows silently matches OLD art (the 2026-07-16 stale-bank
+    incident), and on windows a case-colliding leftover can shadow a real sprite. the keep-set
+    compares case-folded paths since that fs is case-insensitive. returns how many were removed."""
+    keep = {str((index_path.parent / r["file"]).resolve()).casefold() for r in index}
+    removed = 0
+    for cat in categories:
+        d = out_dir / cat
+        if not d.is_dir():
+            continue
+        for p in d.iterdir():
+            if not p.is_file() or p.name.startswith("."):
+                continue  # subdirs and dotfiles (e.g. the dev tree's .gitkeep) are not ours to judge
+            if str(p.resolve()).casefold() in keep:
+                continue
+            try:
+                p.unlink()
+                removed += 1
+            except OSError:
+                pass  # locked/read-only: a leftover is only what we already had yesterday
+    return removed
 
 
 def _norm(name):

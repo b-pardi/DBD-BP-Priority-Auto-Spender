@@ -144,17 +144,22 @@ class RunScreen(ctk.CTkFrame):
         self._refresh_test_btn()
 
     def _ensure_controller(self):
+        if self.app.app_state.library is None:
+            self.app.app_state.library = Library()
         if self.controller is None:
-            if self.app.app_state.library is None:
-                self.app.app_state.library = Library()
-            rows = self.app.app_state.library.rows
             debug_screen = self.app.screens.get("debug")
             frame_sink = debug_screen.push_frame if debug_screen is not None else None
             status_sink = debug_screen.push_status if debug_screen is not None else None
             self.controller = RunController(
-                rows, self.log_queue, self.app.app_state.config or {}, frame_sink=frame_sink,
-                status_sink=status_sink)
+                self.app.app_state.library.rows, self.log_queue, self.app.app_state.config or {},
+                frame_sink=frame_sink, status_sink=status_sink)
             self.app.app_state.loop = self.controller  # so window-close stops the thread
+        else:
+            # a re-scrape rebinds library.rows to a fresh list (Library.reload); the controller holds
+            # the reference it was built with, so a session spanning a re-scrape would keep matching
+            # against the OLD library for the rest of the run (the 2026-07-16 stale-bank incident).
+            # re-point it every start; the running loop keeps the rows it launched with.
+            self.controller.rows = self.app.app_state.library.rows
         return self.controller
 
     def _start(self):

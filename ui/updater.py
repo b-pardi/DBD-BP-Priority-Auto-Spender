@@ -37,13 +37,45 @@ _API = f"https://api.github.com/repos/{REPO}/releases"
 
 # tacked onto every prompt raised because a newer release exists. the app and the icon library update
 # separately: a release can carry a scraper fix or a new chapter, and neither reaches the user until
-# they re-run the scrape, so say so wherever we tell them an update is waiting.
+# they re-run the scrape, so say so wherever we tell them an update is waiting. (the packaged app now
+# re-scrapes itself after an update -- see App._maybe_post_update_refresh -- so this note only rides
+# the from-source dialogs, where that hook deliberately doesn't run.)
 ICONS_NOTE = ("Note: You may need to Update Icons as well (the ⟳ Update icons button in the "
               "sidebar) to pick up new items and library fixes from this release.")
+
+# rides every update prompt: old builds rot fast against the live game/wiki, and a stale build with
+# a stale library is how matches quietly go wrong, so lean on people to take updates.
+NEW_SOFTWARE_NOTE = "This is new software: if there is an update, you should _really_ do it."
 
 
 def current_version():
     return __version__
+
+
+# version stamp: which app version last ran against this user dir. the first launch of a NEW version
+# over an existing library triggers the post-update refresh (clear match caches + re-scrape) so an
+# update is one click instead of three manual chores -- and so a stale bank can never outlive the
+# build that made it (the 2026-07-16 stale-bank incident). works for manual zip swaps too, since it
+# compares versions at launch rather than trusting the updater to leave a marker.
+def _version_stamp():
+    return paths.user_base() / "usr" / "last-run-version"
+
+
+def read_version_stamp():
+    """the version stamped by the last launch, or None (fresh install, or pre-stamp build)."""
+    try:
+        return _version_stamp().read_text(encoding="utf-8").strip() or None
+    except OSError:
+        return None
+
+
+def write_version_stamp(version):
+    try:
+        p = _version_stamp()
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(version, encoding="utf-8")
+    except OSError:
+        pass  # unwritable user dir: worst case the refresh re-offers next launch
 
 
 def install_supported():
@@ -140,7 +172,7 @@ def download_and_install(app, info):
         if info.get("page") and messagebox.askyesno(
             "update available",
             f"A new version ({info['tag']}) is available, but self-install only works in the "
-            f"packaged app.\n\n{ICONS_NOTE}\n\nOpen the download page?",
+            f"packaged app.\n\n{NEW_SOFTWARE_NOTE}\n\n{ICONS_NOTE}\n\nOpen the download page?",
         ):
             import webbrowser
             webbrowser.open(info["page"])
@@ -318,7 +350,8 @@ def _apply_and_restart(app, src_root, updir):
     messagebox.showinfo(
         "installing update",
         "The app will now close and reopen to finish updating. This takes a few seconds, you don't "
-        f"need to do anything.\n\n{ICONS_NOTE}")
+        "need to do anything.\n\nWhen it reopens it will refresh the icon library and match caches "
+        "automatically (a few minutes, one time).")
 
     try:
         # CREATE_NO_WINDOW alone: it still gives cmd a (windowless) console, which console tools need.

@@ -469,12 +469,16 @@ class DebugScreen(ctk.CTkFrame):
                 progress=on_progress)
             self.log(f"scrape done: {len(index)} icons indexed"
                      + (f", {len(skipped)} skipped" if skipped else ""))
-            # the index changed: drop the template cache + thumbnails + the loaded library so they rebuild.
-            for p in paths.template_cache_dir().glob("*.npy"):
-                try:
-                    p.unlink()
-                except OSError:
-                    pass
+            # the index changed: drop the template caches (disk + detect's in-memory bank),
+            # thumbnails, and the loaded library so they rebuild.
+            from src import detect  # deferred like the rest of this screen's src imports
+            for pat in ("*.npy", "*.npz"):
+                for p in paths.template_cache_dir().glob(pat):
+                    try:
+                        p.unlink()
+                    except OSError:
+                        pass
+            detect.reset_library_caches()
             if self.app.app_state.library is not None:
                 self.app.app_state.library.clear_thumbnail_cache()
             self.app.app_state.library = None

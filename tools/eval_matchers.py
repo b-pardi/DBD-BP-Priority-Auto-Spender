@@ -437,12 +437,12 @@ def _cnn_embed(net, bgr):
 
 
 def cnn_bank(rows, net):
-    """(n,128) l2-normed anchor embeddings aligned to rows, cached like the ncc templates. cache is
-    invalidated by BOTH the index mtime (library changed) and the onnx mtime (retrained), so a new
-    library or model rebuilds it automatically."""
-    cache = paths.template_cache_dir() / f"embed-{CNN_ONNX.stem}-{CNN_RES}-{len(rows)}.npy"
-    fresh = max(Path(D.DEFAULT_INDEX).stat().st_mtime, CNN_ONNX.stat().st_mtime)
-    if cache.is_file() and cache.stat().st_mtime >= fresh:
+    """(n,128) l2-normed anchor embeddings aligned to rows, cached like the ncc templates. keyed by
+    CONTENT like detect's bank (rows key+phash fingerprint + onnx bytes, see detect._library_fingerprint),
+    and 'eval-' prefixed so it can never collide with the runtime bank in the shared cache dir."""
+    fp = f"{D._library_fingerprint(rows)}-{D._onnx_fingerprint()}"
+    cache = paths.template_cache_dir() / f"embed-eval-{CNN_ONNX.stem}-{CNN_RES}-{fp}.npy"
+    if cache.is_file():
         B = np.load(cache)
         if B.shape[0] == len(rows):
             return B

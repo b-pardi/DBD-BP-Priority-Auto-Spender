@@ -1,7 +1,10 @@
 ## Changelog
 
+### v0.3.2-beta
+- fixed stale cache issue leading to over reliance on ocr fallback
+
 ### v0.3.1-beta
-- fixed ocr bloodpoint read bug on 16x9 monitors
+- CRITICAL: fixed ocr bloodpoint read bug on 16x9 monitors that prevented users from spending anything as the spender said there were insufficient funds
 
 ### v0.3.0-beta
 - fixed wiki scraper to grab new chapter items handling weird wiki quirks with those

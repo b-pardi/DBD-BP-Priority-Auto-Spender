@@ -12,7 +12,7 @@ import tkinter.messagebox as messagebox
 
 import customtkinter as ctk
 
-from src import paths
+from src import detect, paths
 
 ASSETS = paths.resource_path("ui/assets")  # bundled read-only asset, _MEIPASS/ui/assets when frozen
 
@@ -21,14 +21,18 @@ ASSETS = paths.resource_path("ui/assets")  # bundled read-only asset, _MEIPASS/u
 
 
 def invalidate_caches(app):
-    """drop the regenerable ncc template cache and reload the in-memory library against the fresh
-    index. the Library object is kept (reloaded in place) so widgets holding a reference to it pick
-    up the new rows without being rebuilt."""
-    for p in paths.template_cache_dir().glob("*.npy"):
-        try:
-            p.unlink()
-        except OSError:
-            pass
+    """drop the regenerable template caches -- on disk AND detect's in-memory bank -- and reload the
+    in-memory library against the fresh index. the Library object is kept (reloaded in place) so
+    widgets holding a reference to it pick up the new rows without being rebuilt."""
+    for pat in ("*.npy", "*.npz"):
+        for p in paths.template_cache_dir().glob(pat):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+    # the disk files only matter to the NEXT process; this session's detect() would keep serving the
+    # bank it already built (the 2026-07-16 stale-bank incident), so reset the in-memory one too.
+    detect.reset_library_caches()
     lib = app.app_state.library
     if lib is not None:
         try:

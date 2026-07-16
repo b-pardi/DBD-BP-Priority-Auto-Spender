@@ -7,6 +7,7 @@ every coord is found dynamically (no hardcoded positions) so it works for varyin
 """
 
 import argparse
+import hashlib
 import json
 from pathlib import Path
 import cv2
@@ -238,14 +239,45 @@ def _glyph_to_vec(gray, res=NCC_RES):
     return cv2.resize(gray, (res, res), interpolation=cv2.INTER_AREA).astype(np.float32).ravel()
 
 
+def _library_fingerprint(rows):
+    """short content hash of what each row IS (key+phash, in order). the template/bank caches are
+    POSITIONAL arrays aligned to rows, and a length+mtime check can't see a re-scrape that keeps the
+    count but re-identifies or reorders rows -- a pre-re-scrape bank passed those checks for days and
+    scrambled 1012/1648 matches (the 2026-07-16 stale-bank incident). baking this into the cache
+    filename makes any library change a guaranteed miss."""
+    h = hashlib.sha1()
+    for r in rows:
+        h.update(f"{r.get('key')}|{r.get('phash')};".encode())
+    return h.hexdigest()[:10]
+
+
+def _write_cache(cache, arr, stale_glob):
+    """save a rebuilt template/bank array and drop superseded fingerprints of the same artifact, so
+    the cache dir keeps one live copy instead of accreting one file per library state.
+    soft on OSError (read-only cache dir when frozen): the array still serves from memory."""
+    try:
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        for old in cache.parent.glob(stale_glob):
+            if old != cache:
+                try:
+                    old.unlink()
+                except OSError:
+                    pass  # e.g. held open by another instance; a stale NAME can no longer be served
+        np.save(cache, arr)
+    except OSError:
+        pass  # read-only cache dir (e.g. frozen exe), just rebuild next run
+
+
 def load_ncc_templates(rows, index_path=DEFAULT_INDEX, res=NCC_RES):
     """build (or load cached) the ncc template matrix: each library sprite -> a res*res grayscale vector,
     returns (T, T2): T = (n, res*res) float32 raw vectors,
     T2 = T**2 (reused for the masked-cosine template norms)"""
     # cache in the disposable template cache (repo data/cache in dev, .../cache/templates when
-    # frozen), so the save works even when the bundled index sits in a read-only dir
-    cache = paths.template_cache_dir() / f"{Path(index_path).stem}.ncc{res}.npy"
-    if cache.is_file() and cache.stat().st_mtime >= Path(index_path).stat().st_mtime:
+    # frozen), so the save works even when the bundled index sits in a read-only dir.
+    # keyed by CONTENT (see _library_fingerprint), not the index mtime.
+    stem = Path(index_path).stem
+    cache = paths.template_cache_dir() / f"{stem}.ncc{res}-{_library_fingerprint(rows)}.npy"
+    if cache.is_file():
         T = np.load(cache)
         if T.shape == (len(rows), res * res):
             return T, T * T
@@ -253,11 +285,7 @@ def load_ncc_templates(rows, index_path=DEFAULT_INDEX, res=NCC_RES):
     T = np.empty((len(rows), res * res), np.float32)
     for i, r in enumerate(rows):
         T[i] = _glyph_to_vec(_sprite_glyph_gray(base / r["file"]), res)
-    try:
-        cache.parent.mkdir(parents=True, exist_ok=True)
-        np.save(cache, T)
-    except OSError:
-        pass # read-only cache dir (e.g. frozen exe), just rebuild next run
+    _write_cache(cache, T, f"{stem}.ncc{res}*.npy")
     return T, T * T
 
 
@@ -309,7 +337,29 @@ def id_icon_ncc(icon_bgr, rows, Tz, pool=None, res=NCC_RES):
 # ---- learned (cnn) matcher: embed the glyph via cv2.dnn, nearest cosine over a sprite-embedding bank
 
 _CNN_NET = None                # lazily loaded cv2.dnn net (one model, reused across nodes)
-_CNN_BANK = None               # (cache_key, (n,128) bank) so repeated detect() calls skip the rebuild
+_CNN_BANK = None               # (fingerprint, (n,128) bank) so repeated detect() calls skip the rebuild
+_ONNX_FP = None                # ((mtime, size), sha1[:10]) of CNN_ONNX so the 2mb hash runs once per run
+
+
+def _onnx_fingerprint():
+    """short content hash of the encoder weights. the bank must be rebuilt on a retrain, but the
+    bundled onnx's MTIME is worthless for that: pyinstaller stamps it with the exe build time, so
+    every rebuild of an unchanged model looked like a retrain (and a genuinely different model
+    restored from backup could look fresh). hash the bytes instead; mtime+size only gate re-hashing."""
+    global _ONNX_FP
+    st = Path(CNN_ONNX).stat()
+    key = (st.st_mtime, st.st_size)
+    if _ONNX_FP is None or _ONNX_FP[0] != key:
+        _ONNX_FP = (key, hashlib.sha1(Path(CNN_ONNX).read_bytes()).hexdigest()[:10])
+    return _ONNX_FP[1]
+
+
+def reset_library_caches():
+    """drop the in-memory library-derived cache (the cnn embed bank). the ui calls this after a
+    re-scrape: the content-keyed lookups would miss anyway once the rows change, but an explicit
+    reset frees the old bank and can't leave a session serving one against a stale rows snapshot."""
+    global _CNN_BANK
+    _CNN_BANK = None
 
 
 def _sprite_glyph_color(path):
@@ -354,17 +404,19 @@ def load_cnn_model():
 
 def load_cnn_bank(rows, index_path=DEFAULT_INDEX):
     """(n,128) l2-normed sprite-embedding bank aligned to rows, cached to template_cache_dir like the ncc templates.
-    invalidated by the index mtime (library changed) or onnx mtime (retrained), so a self-updating library or new model rebuilds it automatically.
+    keyed by CONTENT, not length+mtimes: the filename fingerprints the rows' key+phash sequence and
+    the onnx bytes, so a re-scraped/re-identified library or a retrained model can never be served a
+    bank built for a different one. the old mtime check let a pre-re-scrape bank pass as fresh and
+    scramble 1012/1648 matches (the 2026-07-16 stale-bank incident).
     built over the FULL rows (pool masks the unavailable ones at match time, same as the ncc path)."""
     global _CNN_BANK
-    onnx_mtime = Path(CNN_ONNX).stat().st_mtime
-    key = (len(rows), onnx_mtime)
-    if _CNN_BANK is not None and _CNN_BANK[0] == key:
+    fp = f"{_library_fingerprint(rows)}-{_onnx_fingerprint()}"
+    if _CNN_BANK is not None and _CNN_BANK[0] == fp:
         return _CNN_BANK[1]
-    cache = paths.template_cache_dir() / f"embed-{Path(CNN_ONNX).stem}-{CNN_RES}-{len(rows)}.npy"
-    fresh = max(Path(index_path).stat().st_mtime, onnx_mtime)
+    stem = Path(CNN_ONNX).stem
+    cache = paths.template_cache_dir() / f"embed-{stem}-{CNN_RES}-{fp}.npy"
     B = None
-    if cache.is_file() and cache.stat().st_mtime >= fresh:
+    if cache.is_file():
         B = np.load(cache)
         if B.shape[0] != len(rows):
             B = None
@@ -372,12 +424,8 @@ def load_cnn_bank(rows, index_path=DEFAULT_INDEX):
         net = load_cnn_model()
         base = Path(index_path).parent
         B = np.stack([_cnn_embed(net, _sprite_glyph_color(base / r["file"])) for r in rows]).astype(np.float32)
-        try:
-            cache.parent.mkdir(parents=True, exist_ok=True)
-            np.save(cache, B)
-        except OSError:
-            pass  # read-only cache dir (frozen), rebuild next run
-    _CNN_BANK = (key, B)
+        _write_cache(cache, B, f"embed-{stem}-{CNN_RES}-*.npy")
+    _CNN_BANK = (fp, B)
     return B
 
 

@@ -104,7 +104,7 @@ class App(ctk.CTk):
             )
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-        self.after(200, self._maybe_first_run_scrape)  # let the window settle before any prompt
+        self.after(200, self._maybe_post_update_refresh)  # post-update refresh, else first-run prompt
         self.after(400, self._prewarm_library)         # ...and paint before we take cpu for icons
         self.after(1500, self._check_updates_on_launch)  # background app-update check, silent on fail
 
@@ -251,17 +251,38 @@ class App(ctk.CTk):
                 "update available",
                 f"A new version ({info['tag']}) is available (you have "
                 f"{updater.current_version()}).\n\nSelf-install only works in the packaged app. "
-                f"Open the download page?\n\n{updater.ICONS_NOTE}",
+                f"Open the download page?\n\n{updater.NEW_SOFTWARE_NOTE}\n\n{updater.ICONS_NOTE}",
             ):
                 webbrowser.open(info["page"])
             return
         if messagebox.askyesno(
             "update available",
             f"A new version ({info['tag']}) is available (you have {updater.current_version()}).\n\n"
-            "Download and install it now? The app will update itself and restart, you don't need "
-            f"to do anything.\n\n{updater.ICONS_NOTE}",
+            "Download and install it now? The app will update itself, restart, and refresh the "
+            "icon library automatically — you don't need to do anything.\n\n"
+            f"{updater.NEW_SOFTWARE_NOTE}",
         ):
             updater.download_and_install(self, info)
+
+    def _maybe_post_update_refresh(self):
+        """first launch of a new build over an existing library: finish the update for the user by
+        clearing the match caches and re-running the scraper, so the library, index, and template
+        banks all match the new build without three manual chores (a stale bank outliving an update
+        is exactly the 2026-07-16 scrambled-matches incident). frozen only -- from source a version
+        bump is the developer's own business -- and detected by a version stamp rather than an
+        updater marker, so manual zip swaps refresh too. falls through to the first-run prompt."""
+        if paths.is_frozen():
+            lib = self.app_state.library
+            cur = updater.current_version()
+            if updater.read_version_stamp() != cur and lib is not None and getattr(lib, "rows", None):
+                # stamp BEFORE the scrape: if it fails (offline), retrying every launch would nag
+                # forever; the caches are already cleared, and Update icons remains a click away.
+                updater.write_version_stamp(cur)
+                scrape_runner.invalidate_caches(self)
+                scrape_runner.run_scrape(self, force=True, on_done=self._after_scrape)
+                return
+            updater.write_version_stamp(cur)
+        self._maybe_first_run_scrape()
 
     def _maybe_first_run_scrape(self):
         """on a fresh install the index is absent and the library loads empty; offer to fetch it."""

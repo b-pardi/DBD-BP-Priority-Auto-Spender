@@ -29,18 +29,23 @@ SHAPE_CATEGORIES = {
 # ncc/cnn are cosine (higher=better), phash is hamming distance (lower=better).
 # ncc gate is a placeholder from the matcher eval (real conf ~0.5-0.84), tune vs fixtures.
 NCC_CONF_MIN = 0.45
-# cnn cosine gate calibrated on the real independent labels (eval_matchers cnneval + sweep): 0.65 is
-# ~80% coverage at ~96% precision, so confident cnn matches skip ocr and the near-dup slippers
-# (wornOutTools, skeletonKey) fall below it and route to ocr.
+# cnn cosine gate calibrated on the real independent labels (eval_matchers cnneval + sweep): at 0.65
+# coverage is ~88% at ~97% precision, so confident cnn matches skip ocr and the near-dup slippers
+# (wornOutTools, skeletonKey) fall below it and route to ocr. reconfirmed 2026-07-17 post-retrain --
+# the score distribution didn't shift enough to move it, and the one above-gate wrong buy left
+# (faintReagent->clearReagent, anchor-sim 0.977) is a near-dup that raising the gate can't catch
+# without gutting coverage; it needs the near-dup ocr veto instead.
 CNN_CONF_MIN = 0.65
 PHASH_MAX_HAM = 10
 # cnn margin RESCUE. gating ON the margin was dropped 2026-06-29 because it rejected correct
-# near-ties; it earns its keep the other way round. real top5 is 98.6% vs top1 83.1%, i.e. the model's
-# misses ARE near-ties, so a decisive runner-up gap is strong evidence even at a middling cosine.
-# purely additive: it can only pull nodes OFF the ocr path, never onto it.
+# near-ties; it earns its keep the other way round: the model's few misses are near-ties, so a
+# decisive runner-up gap is strong evidence even at a middling cosine. purely additive -- it can
+# only pull nodes OFF the ocr path, never onto it.
 # the cap is because detect scores pool-excluded rows -2.0, so a pool narrowed to ONE candidate
 # reports a nonsense margin (score + 2.0) with no real runner-up behind it; real margins sit far below.
-# NOT CALIBRATED -- re-sweep against the real labels (eval_matchers cnneval) after the retrain.
+# calibrated 2026-07-17 on the real labels (model_diagnose plots rescue sweep): of 6 sub-gate nodes
+# one is a correct match, and 0.55/0.15 rescues it with 0 wrong buys -- the lone sub-gate wrong buy
+# sits at win<0.50 with margin<0.10, well clear of this box.
 CNN_RESCUE_MIN = 0.55
 CNN_RESCUE_MARGIN = 0.15
 CNN_MARGIN_CAP = 1.0
@@ -130,6 +135,54 @@ def _row_informativeness(row):
     the alias uploads come in with rarity null and an empty desc, because their swapped name
     misses the wiki rarity-category and page-title lookups, so the canonical row outranks them."""
     return (row.get('rarity') is not None, bool(row.get('desc')))
+
+
+# trailing tokens dead-art filenames carry ('saboteur_old', 'vigil_noLicense', 'LendaHand_10.0.0PTB');
+# only trailing tokens are stripped so real names keep their leading articles ('No Mither' is safe).
+_DEAD_SUFFIX_WORDS = {'old', 'no', 'license', 'nolicense', 'original', 'icon', 'ptb'}
+
+
+def _strip_dead_suffix(name):
+    """name minus trailing version/variant tokens, for identity lookup. digit tokens count as junk too."""
+    words = (name or '').split()
+    while words and (words[-1].lower() in _DEAD_SUFFIX_WORDS or any(c.isdigit() for c in words[-1])):
+        words.pop()
+    return ' '.join(words)
+
+
+def demote_dead_art(rows, near_ham=10):
+    """desc-less rows whose identity provably lives on an article-backed row -> obtainable
+    'unavailable', in place. returns how many were demoted.
+
+    a desc-less row resolved no article, so its name is just the filename. usually that's dead art:
+    the perk got renamed (license lost/returned) and the article moved to another upload. left
+    matchable these sit as false anchors next to the live row and steal its matches.
+
+    demoted only on evidence, never on desc-lessness alone (a hatnote can eat a live row's desc):
+    name carried by a desc-ful row's names/aliases (redirect graph), or same-category phash within
+    near_ham of a desc-ful row (same art, different filename).
+    rows the rarity rule already rejects (non-perk, rarity null) are skipped as already dead."""
+    carried = set()
+    keepers = []                                   # (category, phash int) of article-backed rows
+    for r in rows:
+        if r.get('desc'):
+            carried |= row_names(r)
+            if r.get('phash'):
+                keepers.append((r.get('category'), int(r['phash'], 16)))
+    n = 0
+    for r in rows:
+        if r.get('desc') or r.get('obtainable') == 'unavailable':
+            continue
+        if r.get('category') != 'perk' and r.get('rarity') is None:
+            continue                               # the rarity rule's territory
+        name_hit = normalize_name(_strip_dead_suffix(r.get('name'))) in carried
+        h = int(r['phash'], 16) if r.get('phash') else None
+        art_hit = h is not None and any(
+            c == r.get('category') and bin(h ^ k).count('1') <= near_ham for c, k in keepers)
+        if name_hit or art_hit:
+            r['obtainable'] = 'unavailable'
+            n += 1
+    return n
 
 
 def dedup_index_rows(rows, near_ham=10):

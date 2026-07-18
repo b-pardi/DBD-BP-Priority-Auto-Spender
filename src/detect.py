@@ -16,6 +16,7 @@ import imagehash
 from PIL import Image
 
 from . import paths
+from .node import demote_dead_art
 from .resolution import Resolution
 
 USR_HSV = paths.user_base() / "usr" / "rarity-HSVs.json"   # active anchors, evolve per web; user_base writable when frozen
@@ -54,8 +55,9 @@ NCC_RES = 96  # res of the ncc template/query vectors (96 beats 128 on conf50, c
 CNN_ONNX = paths.resource_path("data/models/glyph_encoder.onnx")
 CNN_RES = 96
 
-# rarity anchor colors: load from usr (auto-seeded from EMPIRICAL_SEED), then classify.
-# TODO: user calibration for hsv colors
+# rarity anchor colors: load from usr (auto-seeded from EMPIRICAL_SEED, hand-editable), then classify.
+# per-user auto-calibration REJECTED 2026-07-16: self-poisons (a washed-out ultra rare would classify
+# 'common' and drag common's anchor onto it), and gamma tolerance is already HSV_WEIGHTS' job.
 _HSVs = None  # cached {rarity: [h, s, v]} for the run
 
 NODE_SHAPE_DICT = { # geometric relationship of node content and node type
@@ -150,6 +152,17 @@ def classify_rarity(hsv, anchors=None):
     return best, best_d
 
 
+def rarity_candidates(hsv, anchors=None):
+    """every rarity ranked by anchor distance, nearest first, [] if the disk read failed.
+    classify_rarity only returns the head; detect walks the tail when the head's hue band can't
+    isolate a plate (see isolate_node_glyph)."""
+    anchors = anchors or get_ref_hsvs()
+    d = {rar: _hsv_dist(hsv, ref) for rar, ref in anchors.items()}
+    if any(v is None for v in d.values()):
+        return []
+    return sorted(d, key=d.get)
+
+
 def disk_color_mask(frame, htol=8, s_floor=62, v_floor=38):
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV) # (H,W,3) uint8, h in 0..179
     anchors = get_ref_hsvs() # rarity: [h,s,v]
@@ -159,30 +172,6 @@ def disk_color_mask(frame, htol=8, s_floor=62, v_floor=38):
         frame_mask |= hue_band_mask(hsv, h, htol, s_floor, v_floor)  # wrap-safe, same util as refine_node
 
     return frame_mask
-
-
-def refine_ref_hsvs(disk_samples, seed=None, out_path=USR_HSV, min_samples=3):
-    """auto-update anchors from real disk colors (disk_samples = list of (h,s,v) read off a frame, localize feeds these).
-    each sample groups to its nearest seed anchor, then the anchor becomes that group's median (not mean, so a stray glyph/glow pixel or mid-animation disk can't drag it).
-    a rarity with too few samples keeps the seed. writes {rarity:[h,s,v]} to usr/ and refreshes the cache.
-    groups against the stable EMPIRICAL_SEED so the reference can't drift while the written values still track the user's monitor over webs."""
-    seed = seed or {rar: list(hsv) for rar, hsv in EMPIRICAL_SEED.items()}
-    groups = {rar: [] for rar in seed}
-    for hsv in disk_samples:
-        rar, _ = classify_rarity(hsv, seed)
-        groups[rar].append(hsv)
-    refined = {}
-    for rar, ref in seed.items():
-        samples = groups[rar]
-        if len(samples) >= min_samples:
-            refined[rar] = [int(c) for c in np.median(np.array(samples), axis=0)]  # (k,3)->(3,)
-        else:
-            refined[rar] = list(ref)  # not enough evidence yet, keep the seed
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(refined, indent=2), encoding="utf-8")
-    global _HSVs
-    _HSVs = refined
-    return refined
 
 
 def load_rows(index_path=DEFAULT_INDEX):
@@ -195,7 +184,17 @@ def load_rows(index_path=DEFAULT_INDEX):
     for r in rows:
         if r.get("rarity") is None and "is a Visceral" in (r.get("desc") or ""):
             r["rarity"] = "ultra rare"
+    demote_dead_art(rows)  # same spare-a-re-scrape treatment, for renamed perks' orphan uploads
     return rows
+
+
+def is_matchable(row):
+    """can this row ever be a bloodweb node? excludes obtainable=='unavailable' (killer powers,
+    retired content) and non-perk rows with no rarity tier (raw-upload twins, in-match pickups).
+    applied at load so old indexes heal without a re-scrape."""
+    if row.get("obtainable") == "unavailable":
+        return False
+    return row.get("category") == "perk" or row.get("rarity") is not None
 
 
 def load_index(index_path=DEFAULT_INDEX):
@@ -1004,7 +1003,9 @@ def find_nodes_in_frame(
                 continue # remove circle from list if a rarity wasn't obtained
             if max_anchor_dist is not None and dist > max_anchor_dist:
                 continue                           # not near any rarity -> probably not a node
-        nodes.append((int(x), int(y), int(r), rarity, slot, state, ring_r))
+        # runners-up ride along for isolate_node_glyph's retry; appended so index unpackers stay valid.
+        nodes.append((int(x), int(y), int(r), rarity, slot, state, ring_r,
+                      rarity_candidates(disk_hsv)))
 
     if debug:
         _show(draw_detections(frame, nodes), "find_nodes")
@@ -1103,12 +1104,13 @@ def isolate_node_contents(
     return int(round(cx)), int(round(cy)), int(round(r_ref)), best, crop
 
 
-def normalize_glyph(crop, contour, rarity=None, erode_ksize=3, out_size=GLYPH_SIZE):
+def normalize_glyph(crop, contour, rarity=None, erode_ksize=3, out_size=GLYPH_SIZE, keep_k=0.65):
     """strip the colored socket from a node crop so only the glyph remains on black, framed to match scraper.normalize_sprite (tight-crop -> square-pad centered -> resize).
 
     glyph = the BRIGHT pixels inside the socket polygon; the white-ish glyph always sits brighter than the rarity disk fill, so an otsu cut on the value channel keys the fill out without per-rarity hue math (the old hue-subtraction left colored halos and broke on gold/event).
     the contour is convex-hulled first so glyph strokes touching the socket edge don't carve notches out of the interior mask.
     rarity=='event' triggers a clahe contrast boost on the value channel before the otsu cut (the gold disk is too bright for plain otsu to split the white glyph from the fill).
+    keep_k prunes mask components that never come within keep_k*r_in of the plate center before the tight bbox: the add-on '+' marker survives otsu at the plate periphery and stretched the bbox, shoving faint art off-center (the focusLens->saboteur drift family, real top1 91.4->94.8%).
     returns a GLYPH_SIZE bgr glyph-on-black square, or None if nothing survives."""
     h, w = crop.shape[:2]
     val = cv2.cvtColor(crop, cv2.COLOR_BGR2HSV)[..., 2]   # value channel (brightness), (h,w)
@@ -1120,8 +1122,9 @@ def normalize_glyph(crop, contour, rarity=None, erode_ksize=3, out_size=GLYPH_SI
         val = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(val)
 
     # interior = filled convex socket polygon, eroded a touch to shed the colored rim/anti-alias
+    hull = cv2.convexHull(contour)
     inside = np.zeros((h, w), np.uint8)
-    cv2.drawContours(inside, [cv2.convexHull(contour)], -1, 255, cv2.FILLED)
+    cv2.drawContours(inside, [hull], -1, 255, cv2.FILLED)
     if erode_ksize:
         k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (erode_ksize, erode_ksize))
         inside = cv2.erode(inside, k)
@@ -1134,6 +1137,26 @@ def normalize_glyph(crop, contour, rarity=None, erode_ksize=3, out_size=GLYPH_SI
         return None
     thr, _ = cv2.threshold(vin, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
     glyph_mask = (inside > 0) & (val >= thr)
+
+    if keep_k:
+        # drop bright peripheral junk before the bbox: the '+' marker / corner shine sits at
+        # min-dist 0.83-0.98 r_in on the labeled crops while real art, composited centered, always
+        # reaches the middle -- 0.65 splits the two populations with margin on both sides.
+        # nearest-pixel test (not centroid) so a big ring that spans center to rim is kept whole.
+        n_lab, lab = cv2.connectedComponents(glyph_mask.astype(np.uint8))
+        hm = cv2.moments(hull)
+        if n_lab > 2 and hm["m00"]:
+            hx, hy = hm["m10"] / hm["m00"], hm["m01"] / hm["m00"]
+            r_in = np.sqrt(cv2.contourArea(hull) / np.pi)
+            keep = np.zeros_like(glyph_mask)
+            for l in range(1, n_lab):
+                comp = lab == l
+                cys, cxs = np.nonzero(comp)
+                if ((cxs - hx) ** 2 + (cys - hy) ** 2).min() <= (keep_k * r_in) ** 2:
+                    keep |= comp
+            if keep.any():               # never let the prune empty the glyph outright
+                glyph_mask = keep
+
     ys, xs = np.where(glyph_mask)
     if len(xs) == 0:
         return None
@@ -1149,6 +1172,23 @@ def normalize_glyph(crop, contour, rarity=None, erode_ksize=3, out_size=GLYPH_SI
     canvas[y0:y0 + gh, x0:x0 + gw] = glyph
 
     return cv2.resize(canvas, (out_size, out_size), interpolation=cv2.INTER_AREA)
+
+
+def isolate_node_glyph(frame, x, y, r, rarities, r_tol=1.5):
+    """isolate a node's socket and normalize its glyph, walking the rarity hypotheses in order until
+    one lands. returns (rarity, iso, glyph), all None when none of them isolate.
+    retry exists because isolate only masks a +-h_tol hue band around one anchor, so a bad first guess
+    (e.g. a glyph-dominant plate washing out the disk read) drops the node outright otherwise.
+    a hypothesis that isolates but disagrees with the matched icon is reconciled downstream via ocr
+    hover, so a wrong guess costs a hover, not a mis-buy."""
+    for rar in rarities:
+        iso = isolate_node_contents(frame, x, y, r, rar, r_tol=r_tol)
+        if iso is None:
+            continue
+        glyph = normalize_glyph(iso[4], iso[3], rar)
+        if glyph is not None:
+            return rar, iso, glyph
+    return None, None, None
 
 
 def classify_socket(node_contours, poly_tol=0.05):
@@ -1196,10 +1236,10 @@ def detect(
         ncc_templates = load_ncc_templates(rows)
     ncc_plain_T = ncc_plain_templates(ncc_templates) if matcher == "ncc" else None
 
-    # exclude obtainable=='unavailable' (killer powers, retired content), they never appear in the bloodweb.
+    # exclude rows that can never be a bloodweb node (see is_matchable).
     # socket shape is no longer a candidate pool but an agreement check reconciled downstream (Node.category_agrees -> ocr fallback),
     # so every node searches the full matchable library. (n,) bool aligned to rows.
-    matchable = np.array([r.get('obtainable') != 'unavailable' for r in rows])
+    matchable = np.array([is_matchable(r) for r in rows])
     # optional priority pool: intersect it in so matching only scores the icons/sources we care about.
     # cats is only needed for the per-node pooled-out test below, so build it lazily here.
     if row_pool is not None:
@@ -1248,17 +1288,16 @@ def detect(
             })
             continue
 
-        iso = isolate_node_contents(frame, x, y, r, rarity, r_tol=r_tol)
+        # runner-up rarities only retried when slotted (a lattice slot proves the node is real, so an
+        # isolate miss there is just a bad rarity guess; off-lattice it resurrects junk instead).
+        cands = node[7] if slot is not None else None
+        rarity, iso, glyph = isolate_node_glyph(frame, x, y, r, cands or [rarity], r_tol=r_tol)
         if iso is None:
-            if debug: print("WARNING: detect() - Node skipped after failing to isolate node contents")
+            if debug: print("WARNING: detect() - Node skipped, no rarity hypothesis could isolate a glyph")
             continue
-        
+
         cx, cy, r_ref, node_contours, crop = iso
         socket_shape = classify_socket(node_contours) # use socket shape geometry to classify node type (item/addon, perk, offering)
-        glyph = normalize_glyph(crop, node_contours, rarity) # standardize glyph sizes to match with indexed icons
-        if glyph is None:
-            if debug: print("WARNING: detect() - Node skipped after not finding a glyph in the socket")
-            continue
 
         # with a priority pool active, a node whose socket shape has no candidate left in the pool is outside our scope (e.g. a perk node on a survivor run that only lists items);
         # emit it unknown so the loop skips it, no match scored and no ocr hover (see Node.pooled_out).

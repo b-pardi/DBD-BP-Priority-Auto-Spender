@@ -1,4 +1,4 @@
-## v0.3.2-beta
+## v0.3.3-beta
 
 Spends your bloodpoints way smarter than the current auto spender (at least until Behaviour steals my idea again). **Note** that 'Dry Run' is enabled by default (so behaviour can't sue me probably idk any lawyers dm me) and should be disabled to actually work.
 
@@ -16,4 +16,4 @@ Spends your bloodpoints way smarter than the current auto spender (at least unti
 >
 > note: run dbd in borderless (windowed fullscreen), not exclusive fullscreen. exclusive fullscreen returns black screen-captures, can swallow the synthesized clicks, and blocks the global kill-switch hotkey. borderless looks identical and makes capture, clicking, and the f7/f8 hotkeys all work.
 
-Special thanks to my special lady for uplifting my motivation to keep working on this project I love you girly pop pussy boss <3>
+Special thanks to my special lady for uplifting my motivation to keep working on this project I love you girly pop pussy boss <3

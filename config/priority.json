@@ -1003,6 +1003,6 @@
   "entity_race": true,
   "entity_settle_s": 0.65,
   "presence_thresh": 0.32,
-  "matcher_rescue_min": 0.5,
-  "matcher_rescue_margin": 0.1
+  "matcher_rescue_min": 0.55,
+  "matcher_rescue_margin": 0.15
 }

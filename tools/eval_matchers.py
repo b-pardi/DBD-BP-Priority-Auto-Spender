@@ -1,29 +1,19 @@
 """dev-only matcher evaluation harness (not part of the shipped pipeline).
 
-compares icon matchers by running the REAL src/detect pipeline (normalize_glyph + the id_icon*
-matchers) so the numbers reflect production, not a reimplementation. three signals:
+compares icon matchers by running the real src/detect pipeline, so numbers reflect production.
+three signals: synth-node eval (broad, noise calibrated to real cosines), real gold acceptance
+(6 hand-labeled fixture nodes), and calibration (precision over the most confident half, since
+production only skips ocr when confident enough).
 
-1. synthetic-node eval (broad, fully labeled): render every sampled glyph as a bloodweb node,
-    extract + match, measure top-1. noise is calibrated to real-extraction cosines so the relative
-    ranking of the EXTRACTION matchers is trustworthy.
-2. real gold acceptance (narrow, hand-labeled): the 6 known gold/event fixture nodes. thin, but the
-    only fully trustworthy real-degradation signal today (the annotator will grow this).
-3. calibration: production only trusts a match confident enough to skip the OCR hover, so we also
-    report precision over the most-confident half. good calibration can beat a higher top-1.
+glyph matchers (ncc, ncc_masked, phash) match the extracted glyph vs the bare-sprite library,
+the shipped path. crop matchers (crop_ncc, crop_resid) are the experimental "B" direction:
+match the whole node crop vs a bank of synthetic rendered nodes. crop_resid removes the shared
+disk so it doesn't wash out discrimination.
+caveat: crop_* synth numbers are circular (templates and queries both from render_node), judge
+crop_* on gold/real only.
 
-matcher families:
-  glyph matchers (ncc, ncc_masked, phash) match the EXTRACTED glyph vs the bare-sprite library, the
-    shipped path.
-  crop matchers (crop_ncc, crop_resid) are the experimental "B" direction: match the whole node crop
-    (no extraction) vs a bank of SYNTHETIC RENDERED nodes. crop_resid also removes the shared
-    per-pixel common mode (the disk) so it does not wash out discrimination.
-    CAVEAT: crop_* SYNTH numbers are circular (templates and queries both from render_node), so treat
-    them as a plumbing smoke test and judge crop_* on the gold/real set.
-
-pool note: socket shape no longer prunes candidates (it is an agreement check that triggers OCR
-fallback in the spender), so every matcher searches the full matchable library.
-matchable = the index minus obtainable=='unavailable' (killer powers, retired content), which never
-appear in the bloodweb.
+pool note: socket shape no longer prunes candidates, so every matcher searches the full
+matchable library (detect.is_matchable, drops unavailable + rarity-less non-perk rows).
 
 run (needs the conda env):
   conda run -n dbdbp-env python tools/eval_matchers.py compare      # all matchers, synth + gold
@@ -32,8 +22,11 @@ run (needs the conda env):
 """
 
 import sys
+import io
 import json
+import time
 import argparse
+import contextlib
 from pathlib import Path
 import cv2
 import numpy as np
@@ -46,31 +39,27 @@ from src import detect as D
 from src import paths
 from src.resolution import Resolution
 
-# the fixture crop the gold coords were read against, single-sourced from Resolution (the baseline
-# fixtures are 3440x1440 so this stays {x0:300, y0:200, xf:1500, yf:1300}).
+# fixture crop the gold coords were read against (baseline fixtures are 3440x1440)
 WEB_BBOX = Resolution().web_bbox_fallback_px()
 
-# 6 hand-labeled gold/event nodes: {fixture: {(x, y) in the cropped frame: expected key}}.
+# 6 hand-labeled gold/event nodes: {fixture: {(x, y) in the cropped frame: expected key}}
 GOLD = {
     "web-005122.png": {(373, 327): "banquetMedKit", (757, 632): "banquetToolbox",
                        (289, 638): "banquetFlashlight", (470, 639): "10thAnniversary"},
     "web-005135.png": {(610, 396): "banquetFlashlight", (471, 474): "10thAnniversary"},
 }
 
-# rarity disk colors (bgr) derived from detect's empirical hsv anchors, for the synthetic render.
+# rarity disk colors (bgr) derived from detect's empirical hsv anchors, for the synthetic render
 DISK_BGR = {
     rar: cv2.cvtColor(np.uint8([[hsv]]), cv2.COLOR_HSV2BGR)[0, 0].tolist()
     for rar, hsv in D.EMPIRICAL_SEED.items()
 }
 
-# real nodes do not paint the whole disk: the glyph sits on a rarity-colored textured PLATE (square
-# for items/add-ons, hexagon for offerings, diamond for perks) inside a dark neutral socket ring.
-# per-rarity (top, bottom) plate gradient bgr from medians on the 07-04 live scans, brighter toward
-# the top like the tile art. event keeps its gold-splatter colors (that render already matched real).
+# real nodes are a rarity-colored textured PLATE (square/hexagon/diamond) on a dark socket ring,
+# not a flat disk. per-rarity (top, bottom) gradient bgr from medians on live scans.
 PLATE_BGR = {
-    # bottoms kept ~0.85x the measured median (not darker): on dark tiers a few dn of channel
-    # separation is all that keeps hue inside isolate's +-8 band, common bottom widened for the same
-    # reason (probe 2026-07-05)
+    # bottoms kept a bit brighter than measured, dark tiers need the channel separation to stay
+    # inside isolate's hue band
     "common":     ((40, 52, 70), (25, 32, 44)),
     "uncommon":   ((32, 77, 30), (20, 48, 19)),
     "rare":       ((84, 61, 45), (53, 38, 28)),
@@ -78,10 +67,8 @@ PLATE_BGR = {
     "ultra rare": ((51, 24, 111), (32, 15, 70)),
     "event":      ((55, 190, 235), (25, 100, 185)),
 }
-SOCKET_BGR = (44, 42, 46)      # dark neutral disk fill around the plate (measured ring color)
-RIM_BGR = (84, 105, 111)       # beige rim of an immediately-selectable node (mean over bright-rim
-                               # real crops, probe 2026-07-05); non-selectable nodes show only a dim
-                               # thin outline over a translucent fill
+SOCKET_BGR = (44, 42, 46)      # dark neutral disk fill around the plate
+RIM_BGR = (84, 105, 111)       # beige rim of a selectable node; non-selectable shows only a dim outline
 
 
 def _plate_poly(shape, cx, cy, half):
@@ -108,19 +95,17 @@ MATCHER_NAMES = ("ncc", "ncc_masked", "phash", "crop_ncc", "crop_resid", "cnn")
 # ----------------------------------------------------------------------------- matchable library
 
 def load_matchable():
-    """load the index and drop obtainable=='unavailable' rows (killer powers, retired content) so no
-    matcher can propose them. returns a dict with every template rep aligned to the SAME filtered
-    row order.
-
-    the ncc/phash matrices are built from the FULL index then masked down, not rebuilt filtered, so
-    detect's shared on-disk cache stays full-sized and uncorrupted."""
+    """load the index and drop rows detect.is_matchable rejects, so no matcher can propose them.
+    returns a dict with every template rep aligned to the same filtered row order.
+    ncc/phash matrices build from the full index then get masked, so detect's shared cache
+    stays full-sized."""
     rows_full, hashes_full = D.load_index()
-    keep = np.array([r.get("obtainable") != "unavailable" for r in rows_full])
+    keep = np.array([D.is_matchable(r) for r in rows_full])
     rows = [r for r, k in zip(rows_full, keep) if k]
     T_full, T2_full = D.load_ncc_templates(rows_full)          # (n, res*res) built/cached from full
     Tz_full = D.ncc_plain_templates((T_full, T2_full))
     print(f"matchable library: {len(rows)}/{len(rows_full)} rows "
-          f"({int((~keep).sum())} unavailable dropped)")
+          f"({int((~keep).sum())} unmatchable dropped)")
     return {
         "rows": rows,
         "hashes": hashes_full[keep],
@@ -131,26 +116,29 @@ def load_matchable():
 
 # --------------------------------------------------------------------------- synthetic node render
 
-def render_node(file, rarity, r=40, noise=25, blur=1.2, tint=0.4, jitter=4, rng=None, degrade=True, downscale=2.0, disk_grad=0.0, glyph_white=0.0, event_speckle=0.0, plate_shape=None, plus_marker=False, bg=None, selectable=True, node_alpha=0.62):
-    """compose one synthetic bloodweb node and return (crop_bgr, contour). the contour is the disk
-    circle, fed to normalize_glyph so extraction runs exactly as in production.
+def render_node(file, rarity, r=40, noise=25, blur=1.2, tint=0.4, jitter=4, rng=None, degrade=True, downscale=2.0, disk_grad=0.0, glyph_white=0.0, event_speckle=0.0, plate_shape=None, plus_marker=False, bg=None, selectable=True, node_alpha=0.62, art_alpha=1.0, plate_gain=1.0, art_crop=True, art_shift=0.0, art_zoom=0.0):
+    """compose one synthetic bloodweb node, return (crop_bgr, contour) for normalize_glyph.
 
-    steps: colored rarity disk, whitish line-art glyph composited via its alpha (tinted toward the
-    disk to mimic the low-contrast fill), then optional degradation. degrade=True (default, for
-    synthetic QUERIES) adds downscale, blur, noise, and affine jitter calibrated to real cosines.
-    degrade=False (the crop-matcher TEMPLATE bank) returns the clean ideal composite.
+    colored rarity disk, whitish glyph composited via alpha (tinted toward disk), then optional
+    degradation. degrade=True (synthetic queries) adds downscale/blur/noise/jitter calibrated to
+    real cosines. degrade=False (template bank) returns the clean composite.
+    art_alpha scales the sprite's own alpha (in-game art draws semi-transparent over bright plates,
+    so low values give otsu the faint fragmented strokes real extraction produces); plate_gain
+    scales the plate fill brightness, shifting where the otsu cut lands.
+    art_crop=False composites the UNCROPPED icon canvas at plate size like the game does, so
+    per-icon padding survives and small-art icons render small + pixelated like real nodes
+    (the bbox-crop-to-1.6r default draws every icon equally large and crisp).
+    art_shift/art_zoom jitter the art's position (max px) and scale (max frac) RELATIVE TO THE
+    PLATE; unlike the crop jitter in make_synth_glyph this misregistration survives isolate's
+    recentering, modeling art that isn't drawn dead-center on the plate.
 
-    plate_shape ('square' | 'hexagon' | 'rhombus') switches to the REAL layout: a dark socket ring
-    with a rarity-colored textured plate under the glyph, not a full rarity-colored disk. real
-    extraction leaks plate color/texture into the glyph (focus-lens/luckless-mouse miss, probe
-    2026-07-05) so training queries must see it; None keeps the legacy flat-disk render.
-    plus_marker adds the bright add-on '+' at the plate top-right, which survives otsu and pollutes
-    the extracted glyph.
-    bg is an optional side-sized menu-floor patch used as the base layer (real crop corners sit at
-    V~51-97, not near-black).
-    selectable picks the two real node states (plate mode only): True = opaque node + solid beige
-    rim; False = fill blended over the floor at node_alpha (~0.62) with only a dim rim outline, a
-    node that cannot be bought yet."""
+    plate_shape ('square'|'hexagon'|'rhombus') renders the real layout: dark socket ring + a
+    rarity-colored textured plate, since real extraction leaks plate color into the glyph.
+    None keeps the legacy flat-disk render.
+    plus_marker adds the bright add-on '+' that survives otsu and leaks into the glyph.
+    bg is an optional menu-floor patch as the base layer (real crop corners aren't near-black).
+    selectable picks the two real node states (plate mode only): True = opaque + solid rim,
+    False = blended over the floor with just a dim rim outline (not yet buyable)."""
     rng = rng or np.random.default_rng(0)
     side = int(2.6 * r)
     cx = cy = side // 2
@@ -174,13 +162,10 @@ def render_node(file, rarity, r=40, noise=25, blur=1.2, tint=0.4, jitter=4, rng=
         cv2.circle(crop, (cx, cy), r, [int(c) for c in disk], -1)
 
     if plate_shape:
-        # rarity-colored plate: vertical gradient + grain + dark grunge speckle, clipped to the disk.
-        # event keeps its denser gold speckle, other tiers get light grunge so the otsu leak has the
-        # texture real plates have.
+        # gradient + grain + grunge speckle, clipped to the plate shape
         half = int(0.75 * r)
-        top_c, bot_c = (np.array(c, np.float32) for c in PLATE_BGR[rarity])
-        # glyph's rarity cast comes from the plate, not the dark neutral socket, so tint pulls toward
-        # the plate mid color
+        top_c, bot_c = (np.array(c, np.float32) * plate_gain for c in PLATE_BGR[rarity])
+        # tint pulls toward the plate, not the neutral socket
         disk = (top_c + bot_c) / 2
         yy, xx = np.ogrid[:side, :side]
         in_disk = (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
@@ -190,10 +175,8 @@ def render_node(file, rarity, r=40, noise=25, blur=1.2, tint=0.4, jitter=4, rng=
         tg = np.clip((np.arange(side) - (cy - half)) / max(1, 2 * half), 0, 1)  # 0 top .. 1 bottom
         grad = top_c[None, :] * (1 - tg[:, None]) + bot_c[None, :] * tg[:, None]
         patch = np.repeat(grad[:, None, :], side, axis=1)
-        # grain must be LUMINANCE-correlated (scale all 3 channels together), not per-channel iid:
-        # iid noise on these dark fills scrambles hue out of isolate's +-8 band, the mask fragments,
-        # and isolate latches a glyph chunk -> sliced extractions (probe 2026-07-05: real common
-        # plates 41% in-band vs 11% synth with iid grain)
+        # grain must be luminance-correlated, not per-channel: iid noise pushes hue out of isolate's
+        # band and fragments the mask
         patch *= (1 + rng.normal(0, 0.12, patch.shape[:2]))[..., None]
         patch += rng.normal(0, 2, patch.shape)                 # faint residual color grain
         crop[m] = np.clip(patch[m], 0, 255).astype(np.uint8)
@@ -204,17 +187,8 @@ def render_node(file, rarity, r=40, noise=25, blur=1.2, tint=0.4, jitter=4, rng=
             py = int(cy + rad_f * half * np.sin(ang))
             if 0 <= py < side and 0 <= px < side and m[py, px]:
                 cv2.circle(crop, (px, py), int(rng.integers(1, max(2, r // 16))), (26, 24, 28), -1)
-        if plus_marker:
-            # bright add-on '+' straddling the plate top-right; real ones survive otsu and leak a
-            # corner notch into the extracted glyph
-            mx, my = cx + half, cy - half
-            arm, th_px = max(2, int(0.18 * r)), max(2, int(0.07 * r))
-            c = tuple(int(v) for v in rng.integers(170, 215, 1).repeat(3))
-            cv2.rectangle(crop, (mx - arm, my - th_px), (mx + arm, my + th_px), c, -1)
-            cv2.rectangle(crop, (mx - th_px, my - arm), (mx + th_px, my + arm), c, -1)
         if selectable:
-            # immediately-buyable node: stays opaque, draw the solid beige rim with a darker arc so
-            # it is not a perfect uniform annulus (no real rim is)
+            # buyable node: opaque, solid beige rim with a darker arc so it's not a perfect annulus
             rim_c = np.clip(np.array(RIM_BGR) + rng.normal(0, 8, 3), 0, 255).astype(int)
             cv2.circle(crop, (cx, cy), int(1.06 * r), tuple(int(v) for v in rim_c),
                        max(2, int(0.11 * r)))
@@ -223,8 +197,7 @@ def render_node(file, rarity, r=40, noise=25, blur=1.2, tint=0.4, jitter=4, rng=
                         a0 + rng.uniform(60, 160), tuple(int(v * 0.7) for v in rim_c),
                         max(1, int(0.05 * r)))
         else:
-            # not-yet-selectable: the node fill sits translucently over the menu floor and only a
-            # dim thin rim outline shows
+            # not yet buyable: fill blends translucently over the floor, only a dim rim shows
             yy2, xx2 = np.ogrid[:side, :side]
             in_disk2 = (xx2 - cx) ** 2 + (yy2 - cy) ** 2 <= int(1.12 * r) ** 2
             blend = node_alpha * crop.astype(np.float32) + (1 - node_alpha) * base.astype(np.float32)
@@ -232,11 +205,8 @@ def render_node(file, rarity, r=40, noise=25, blur=1.2, tint=0.4, jitter=4, rng=
             cv2.circle(crop, (cx, cy), int(1.06 * r),
                        tuple(int(v * 0.62) for v in RIM_BGR), max(1, r // 18))
     elif event_speckle > 0:
-        # real event sockets are not a flat gold disk: a gold splatter SQUARE sits under the glyph,
-        # bright yellow fading to orange, riddled with dark speckle holes. its V spans ~27..255
-        # continuously so otsu can't split fill from glyph and the real glyph keeps a gold bg (the
-        # leak IS the signal separating the banquet/masquerade/anniversary reskins). without this
-        # the synth event glyph extracts clean-on-black, queries that never occur live (probe 07-03).
+        # real event sockets are a gold splatter square under the glyph, not a flat disk; the glyph
+        # keeps a gold bg (the leak is the signal separating the reskins), so synth needs it too
         half = int(0.75 * r)                                    # splatter square ~1.5r wide
         yy, xx = np.ogrid[:side, :side]
         in_disk = (xx - cx) ** 2 + (yy - cy) ** 2 <= r * r
@@ -257,20 +227,41 @@ def render_node(file, rarity, r=40, noise=25, blur=1.2, tint=0.4, jitter=4, rng=
                 cv2.circle(crop, (px, py), int(rng.integers(1, max(2, r // 16))), (26, 24, 28), -1)
 
     g = Image.open(ROOT / "data" / file).convert("RGBA")
-    bb = g.getbbox()
-    g = g.crop(bb) if bb else g
-    gs = int(1.6 * r)
+    if art_crop:
+        bb = g.getbbox()
+        g = g.crop(bb) if bb else g
+        gs = int(1.6 * r)
+    else:
+        gs = int(1.5 * r)     # full canvas at plate size, per-icon padding preserved like the game
+    if art_zoom:
+        gs = max(2, int(round(gs * (1 + rng.uniform(-art_zoom, art_zoom)))))
     g = g.resize((gs, gs), Image.LANCZOS)
     ga = np.array(g).astype(np.float32)
     grgb = (1 - tint) * ga[..., :3][..., ::-1] + tint * disk   # rgb->bgr, tinted toward disk
     if glyph_white:
-        # lift toward white so otsu keeps the glyph not the disk; needed for event where a gold
-        # glyph on a gold disk is otherwise the same brightness (gold-blob fix)
+        # lift toward white so otsu keeps the glyph not the disk (event: gold-on-gold is same brightness)
         grgb = (1 - glyph_white) * grgb + glyph_white * 255.0
-    alpha = ga[..., 3:] / 255.0
+    alpha = ga[..., 3:] / 255.0 * art_alpha
     y0, x0 = cy - gs // 2, cx - gs // 2
+    if art_shift:
+        y0 += int(round(rng.uniform(-art_shift, art_shift)))
+        x0 += int(round(rng.uniform(-art_shift, art_shift)))
+    y0 = min(max(y0, 0), side - gs)      # clamp so a shifted/zoomed composite stays in-frame
+    x0 = min(max(x0, 0), side - gs)
     roi = crop[y0:y0 + gs, x0:x0 + gs].astype(np.float32)
     crop[y0:y0 + gs, x0:x0 + gs] = (alpha * grgb + (1 - alpha) * roi).astype(np.uint8)
+
+    if plate_shape and plus_marker:
+        # bright add-on '+' at the plate's top-right, drawn LAST: in-game it's a ui overlay sitting
+        # on top of the rim and the art (it was under both here until 2026-07-17), and it survives
+        # otsu -- normalize_glyph's peripheral prune is what keeps it out of the glyph bbox now
+        half = int(0.75 * r)
+        # real crops show the marker at either top corner (both occur in the labeled set)
+        mx, my = cx + (half if rng.random() < 0.5 else -half), cy - half
+        arm, th_px = max(2, int(0.18 * r)), max(2, int(0.07 * r))
+        c = tuple(int(v) for v in rng.integers(170, 215, 1).repeat(3))
+        cv2.rectangle(crop, (mx - arm, my - th_px), (mx + arm, my + th_px), c, -1)
+        cv2.rectangle(crop, (mx - th_px, my - arm), (mx + th_px, my + arm), c, -1)
 
     if degrade:
         if downscale and downscale != 1:
@@ -361,10 +352,9 @@ def render_bank(rows, rarity, res=NCC_RES):
 
 
 def resid_bank(rows, rarity, res=NCC_RES):
-    """the common-mode-removed bank: subtract the per-pixel mean over the rarity's templates (which
-    is dominated by the shared disk) from each, then renorm. returns (Br, mu). removing the shared bg
-    analytically is the crop_resid experiment, so the disk does not wash out the small glyph region
-    (the failure mode that sank the frozen-cnn embedding)."""
+    """common-mode-removed bank: subtract the per-pixel mean (dominated by the shared disk) from
+    each template, renorm. returns (Br, mu). keeps the disk from washing out the glyph region,
+    the failure mode that sank the frozen-cnn embedding."""
     if rarity in _RESID:
         return _RESID[rarity]
     B = render_bank(rows, rarity, res)
@@ -571,9 +561,8 @@ def eval_gold(lib, name, fn, kind, verbose=False):
     return correct, total, agree
 
 
-SOURCES_INDEP = ("ocr", "manual")   # labels independent of any matcher (ocr tooltip or hand-typed);
-                                    # 'matcher'-sourced labels are the old ncc guess a human only
-                                    # eyeballed, so scoring ncc on them is partly circular
+SOURCES_INDEP = ("ocr", "manual")   # labels not from a matcher guess; 'matcher'-sourced ones are the
+                                    # old ncc guess a human eyeballed, scoring ncc on those is circular
 
 
 def load_real_labels(path=None, sources=None):
@@ -590,12 +579,10 @@ def load_real_labels(path=None, sources=None):
 
 
 def eval_real(lib, name, fn, kind, verbose=False, sources=None, progress=False):
-    """score a matcher on the annotator's real labeled crops. crop matchers get the saved 1.3*r box
-    directly (the annotator's BOX_K matches ours); glyph matchers re-extract via
-    isolate_node_contents + normalize_glyph off the crop center. a label whose key is not in the
-    matchable library (unavailable, or a stale/alias key) is skipped, not scored.
-    returns (records, higher, correct, total, skipped); records = [(correct_bool, score)].
-    progress shows a tqdm bar (off inside compare's loop to avoid stacked bars)."""
+    """score a matcher on the annotator's real labeled crops. crop matchers use the saved box
+    directly; glyph matchers re-extract via isolate_node_contents + normalize_glyph.
+    a label whose key isn't in the matchable library is skipped, not scored.
+    returns (records, higher, correct, total, skipped)."""
     rows = lib["rows"]
     keyset = {r["key"] for r in rows}
     higher = name != "phash"
@@ -697,10 +684,9 @@ def cmd_gold(args):
 # --------------------------------------------------------------- cnn vs ncc ship-decision readout
 
 def _paired_eval(lib, sources=None):
-    """aligned per-node results for cnn and ncc on the real labels. both are glyph matchers, so the
-    glyph is extracted ONCE per node and fed to both, guaranteeing a paired comparison (needed for
-    McNemar). returns per-node dicts, skipping labels not in the matchable library or where
-    extraction fails (the same skips eval_real makes)."""
+    """aligned per-node results for cnn and ncc on the real labels. glyph is extracted once per
+    node and fed to both, so the comparison is paired (needed for McNemar).
+    skips the same labels eval_real skips."""
     rows = lib["rows"]
     keyset = {r["key"] for r in rows}
     Tz = lib["Tz"]
@@ -735,9 +721,8 @@ def _paired_eval(lib, sources=None):
 
 
 def _mcnemar(cnn_hit, ncc_hit):
-    """exact two-sided McNemar on the discordant pairs. returns (cnn_only, ncc_only, p). small N (148
-    independent labels) so an exact binomial beats the chi-square approx. p is the prob of a split
-    this lopsided if cnn and ncc were equally likely to win a discordant node."""
+    """exact two-sided McNemar on the discordant pairs, returns (cnn_only, ncc_only, p).
+    small N so exact binomial beats the chi-square approx."""
     from math import comb
     cnn_only = sum(a and not b for a, b in zip(cnn_hit, ncc_hit))     # cnn right, ncc wrong
     ncc_only = sum(b and not a for a, b in zip(cnn_hit, ncc_hit))     # ncc right, cnn wrong
@@ -754,15 +739,38 @@ def _top1_conf50(recs, pfx):
     return summarize([(r[f"{pfx}_hit"], r[f"{pfx}_score"]) for r in recs], higher=True)[:2]
 
 
+class _Tee(io.TextIOBase):
+    """stdout duplicator so a report both prints and lands in a file a later session can read."""
+
+    def __init__(self, *streams):
+        self.streams = streams
+
+    def write(self, s):
+        for st in self.streams:
+            st.write(s)
+        return len(s)
+
+    def flush(self):
+        for st in self.streams:
+            st.flush()
+
+
 def cmd_cnneval(args):
-    """the ship-decision readout: cnn vs ncc on real labels, all(211) + independent(148), by rarity,
-    a paired McNemar on the honest independent set, and the highest-confidence cnn misses (near-dups
-    that slip the ocr gate). conf50 on independent is the headline (fewer ocr hovers).
-    bar to beat: ncc 55.4% top1 / 66.2% conf50 on the 148 independent labels."""
+    """ship-decision readout: cnn vs ncc on real labels (all + independent), by rarity, a paired
+    McNemar, and the highest-confidence cnn misses. conf50 on independent is the headline metric.
+    the report also lands in data/models/cnneval_report.txt for post-run review."""
     if not CNN_ONNX.is_file():
         print(f"no model at {CNN_ONNX} -- train first (python tools/glyph_cnn.py train)")
         return
     lib = load_matchable()
+    rpath = CNN_ONNX.parent / "cnneval_report.txt"
+    with open(rpath, "w", encoding="utf-8") as rf, contextlib.redirect_stdout(_Tee(sys.stdout, rf)):
+        print(time.strftime("cnneval %Y-%m-%d %H:%M"))
+        _cnneval_report(lib)
+    print(f"\nreport -> {rpath}")
+
+
+def _cnneval_report(lib):
     allrecs = _paired_eval(lib)
     indep = [r for r in allrecs if r["source"] in SOURCES_INDEP]
     print(f"\ncnn vs ncc on real labels  (all {len(allrecs)} / independent {len(indep)})\n")

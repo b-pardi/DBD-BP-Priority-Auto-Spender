@@ -180,6 +180,57 @@ def check_match_bank():
     return "pass", f"{kind} bank built ({n} rows)"
 
 
+def check_bank_integrity():
+    """stale-bank guard: sampled bank rows must match a fresh embed of their own sprite.
+    catches a bank built against different rows/model/sprites even when shape and mtime look fine."""
+    rows = detect.load_rows()
+    if not rows:
+        return "skip", "no icon library yet"
+    net = detect.load_cnn_model()
+    if net is None:
+        return "skip", "no onnx model (ncc fallback has no embed bank)"
+    bank = detect.load_cnn_bank(rows)
+    base = Path(detect.DEFAULT_INDEX).parent
+    worst, worst_key, n = 1.0, None, 0
+    for i in range(0, len(rows), max(1, len(rows) // 8)):     # ~8 evenly-spaced rows
+        p = base / (rows[i].get("file") or "")
+        if not p.is_file():
+            continue                                          # check_sprites owns missing files
+        cos = float(bank[i] @ detect._cnn_embed(net, detect._sprite_glyph_color(p)))
+        n += 1
+        if cos < worst:
+            worst, worst_key = cos, rows[i]["key"]
+    if n == 0:
+        return "skip", "no sampled sprites on disk"
+    if worst < 0.999:
+        return "fail", (f"bank row for {worst_key!r} diverges from a fresh embed (cos {worst:.3f})"
+                        " — stale or misaligned bank cache, refresh the icon library")
+    return "pass", f"{n} sampled bank rows match fresh embeds (min cos {worst:.4f})"
+
+
+def check_library_hygiene():
+    """duplicate-identity guard: no two matchable anchors should embed nearly identically.
+    twin rows sit at cosine 0.95+, closest legit pair sits ~0.74, so 0.95 splits them cleanly.
+    a warn means the library grew a duplicate the demote rules don't cover yet."""
+    rows = detect.load_rows()
+    if not rows:
+        return "skip", "no icon library yet"
+    net = detect.load_cnn_model()
+    if net is None:
+        return "skip", "no onnx model (anchor similarity needs the embed bank)"
+    keep = [i for i, r in enumerate(rows) if detect.is_matchable(r)]
+    B = detect.load_cnn_bank(rows)[keep]
+    S = B @ B.T
+    np.fill_diagonal(S, -2.0)
+    i, j = np.unravel_index(int(np.argmax(S)), S.shape)
+    top = float(S[i, j])
+    detail = (f"{len(keep)}/{len(rows)} rows matchable; closest anchor pair "
+              f"{rows[keep[i]]['key']} <-> {rows[keep[j]]['key']} at cos {top:.3f}")
+    if top > 0.95:
+        return "warn", detail + " — duplicate rows? refresh the icon library"
+    return "pass", detail
+
+
 def check_resolution_anchoring():
     """fixture-free guard on the fix for the 16:9 bp bug: the top-bar reads must be EDGE-anchored, not
     width fractions. across two widths at one height, bp must stay a fixed px from the RIGHT edge and
@@ -376,6 +427,8 @@ CHECKS = [
     ("tesseract ocr", check_tesseract),
     ("cnn model", check_cnn_model),
     ("match bank", check_match_bank),
+    ("bank integrity", check_bank_integrity),
+    ("library hygiene", check_library_hygiene),
     ("resolution anchoring", check_resolution_anchoring),
     ("detection (gold)", check_detection),
     ("ocr: levels", check_ocr_levels),

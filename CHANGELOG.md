@@ -1,5 +1,19 @@
 ## Changelog
 
+### v0.3.3-beta
+- fixed bug where distance right nodes not detected due to poor bloodweb crop bounds
+- fixed bug where model kept classifying focus lens as saboteur
+    - some scraper icon rows had duplicates and some had rarity none
+    - led to retrained model on fixed glyph dataset
+- brand new part now more consistently recognized
+    - white part of glyph was much larger and hsv anchors fail
+    - added an anchor match ranking to test candidate anchors closest to glyph
+- fixed glyph extraction mis-crop that was the deeper focus lens -> saboteur cause
+    - the addon '+' marker survived the brightness cut at the plate edge, stretched the glyph bbox and shoved faint icons off-center
+    - real match accuracy 91.4% -> 94.8% (98.6% on independent labels) before any retrain
+- synth training renders now mimic real nodes much closer: semi-transparent art, plate brightness wobble, game-scale uncropped icons, slight art shift/zoom, '+' marker drawn on top at either corner; all cli-tunable for retrains
+- new model diagnostics: dashboard png (training curves, score landscape, rescue-gate sweep) via tools/model_diagnose; eval + diagnose reports now also saved to data/models
+
 ### v0.3.2-beta
 - fixed stale cache issue leading to over reliance on ocr fallback
 

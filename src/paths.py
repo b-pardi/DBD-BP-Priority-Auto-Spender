@@ -92,7 +92,7 @@ def debug_dir():
 def ensure_user_dirs():
     """create the writable dirs and, on first frozen run, seed the default config from the bundle.
     returns the resolved config path. a no-op in dev where the repo dirs already exist."""
-    # usr/ holds the evolving rarity-HSV anchors detect rewrites per web (detect.USR_HSV)
+    # usr/ holds rarity-HSV anchors, seeded once from detect.EMPIRICAL_SEED; read-only after that.
     for d in (config_path().parent, cache_dir(), template_cache_dir(), debug_dir(),
               user_base() / "usr"):
         d.mkdir(parents=True, exist_ok=True)

@@ -63,6 +63,12 @@ class Resolution:
     LATTICE_SLOTS = (6, 12, 12)                            # slots per ring, evenly spaced
     NODE_RADIUS = 49.5                                     # node disk radius, snapped detections are forced to this
 
+    @property
+    def web_span_px(self):
+        """web's full diameter in px (outer ring + a node disk either side).
+        backstops ocr.find_web_bbox's right edge, which is unreliable off the baseline aspect ratio."""
+        return 2 * (self.LATTICE_RADII[-1] + self.NODE_RADIUS) * self.scale
+
     @classmethod
     def from_frame(cls, frame):
         """Resolution sized to an actual bgr capture (frame.shape is (h, w, 3) or (h, w))."""

@@ -141,7 +141,7 @@ def _resize_u8(img, res=INPUT_RES):
     return cv2.resize(img, (res, res), interpolation=cv2.INTER_AREA)
 
 
-def build_pool(rows, k_variants, seed, res=INPUT_RES):
+def build_pool(rows, k_variants, seed, res=INPUT_RES, cfg=SG.DEFAULT_AUG):
     """pre-generate the training pool once, in ram. A = one clean color anchor per class; Q = k
     augmented extracted-glyph variants per class, each a fresh render_node -> real isolate ->
     normalize_glyph -> aug. shapes A (n,res,res,3) uint8, Q (n,k,res,res,3) uint8.
@@ -159,7 +159,7 @@ def build_pool(rows, k_variants, seed, res=INPUT_RES):
             g = None
             for _ in range(4):                       # normalize_glyph rarely returns None, retry
                 g = SG.make_synth_glyph(
-                    row["file"], SG.rarity_for_row(row, k, rng), rng, category=row.get("category")
+                    row["file"], SG.rarity_for_row(row, k, rng), rng, cfg, row.get("category")
                 )
                 if g is not None:
                     break
@@ -167,7 +167,7 @@ def build_pool(rows, k_variants, seed, res=INPUT_RES):
     return A, Q
 
 
-def val_synth(rows, seed, res=INPUT_RES):
+def val_synth(rows, seed, res=INPUT_RES, cfg=SG.DEFAULT_AUG):
     """held-out synth val queries: one FRESH synth glyph per class (different seed than the pool),
     for model selection. (n,res,res,3) uint8. selecting on synth keeps the real labels a clean test
     the model never saw, the anti-overfit discipline from the plan."""
@@ -178,7 +178,7 @@ def val_synth(rows, seed, res=INPUT_RES):
         g = None
         for _ in range(4):
             g = SG.make_synth_glyph(
-                row["file"], SG.rarity_for_row(row, i, rng), rng, category=row.get("category")
+                row["file"], SG.rarity_for_row(row, i, rng), rng, cfg, row.get("category")
             )
             if g is not None:
                 break
@@ -302,8 +302,14 @@ def train(args):
     rows, Tz = SG._matchable()
     n = len(rows)
     print(f"classes: {n}  device: {dev}  batch: {args.batch}  steps: {args.steps}")
-    A_u8, Q_u8 = build_pool(rows, args.k, args.seed)
-    V_u8 = val_synth(rows, args.seed + 10_000)
+    # synth fidelity knobs ride the cli (like --aug-bright); everything else stays AugCfg defaults
+    from dataclasses import replace as _cfg_replace
+    cfg = _cfg_replace(
+        SG.DEFAULT_AUG, art_alpha=tuple(args.art_alpha),
+        plate_gain=tuple(args.plate_gain), art_crop=args.art_crop,
+        art_shift=args.art_shift, art_zoom=args.art_zoom)
+    A_u8, Q_u8 = build_pool(rows, args.k, args.seed, cfg=cfg)
+    V_u8 = val_synth(rows, args.seed + 10_000, cfg=cfg)
     nn_idx = _confusion_neighbors(Tz, k=args.fam_k) if args.p_family > 0 else None
 
     # run metadata + histories for the metrics file, one per --out, overwritten per run (rename it
@@ -526,6 +532,22 @@ if __name__ == "__main__":
                          help="weight of the aux class head (0 disables it); discarded at export")
     s_train.add_argument("--aug-bright", dest="aug_bright", type=float, default=0.15)
     s_train.add_argument("--aug-noise", dest="aug_noise", type=float, default=0.03)
+    # render-time fidelity knobs (2026-07-17), defaults = the AugCfg calibration
+    s_train.add_argument("--art-alpha", dest="art_alpha", type=float, nargs=2,
+                         default=list(SG.DEFAULT_AUG.art_alpha), metavar=("LO", "HI"),
+                         help="art opacity jitter range (faint semi-transparent in-game strokes)")
+    s_train.add_argument("--plate-gain", dest="plate_gain", type=float, nargs=2,
+                         default=list(SG.DEFAULT_AUG.plate_gain), metavar=("LO", "HI"),
+                         help="plate brightness jitter range (moves the otsu cut)")
+    s_train.add_argument("--art-crop", dest="art_crop", action="store_true",
+                         help="legacy render: bbox-crop art to 1.6r (default composites the "
+                              "uncropped canvas at plate size like the game)")
+    s_train.add_argument("--art-shift", dest="art_shift", type=float,
+                         default=SG.DEFAULT_AUG.art_shift,
+                         help="max px art offset vs the plate (survives isolate recentering)")
+    s_train.add_argument("--art-zoom", dest="art_zoom", type=float,
+                         default=SG.DEFAULT_AUG.art_zoom,
+                         help="max frac art scale jitter vs the plate")
     s_train.add_argument("--eval-every", dest="eval_every", type=int, default=250)
     s_train.add_argument("--seed", type=int, default=0)
     s_train.add_argument("--cpu", action="store_true", help="force cpu (debug only, slow)")

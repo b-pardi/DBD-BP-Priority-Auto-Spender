@@ -143,17 +143,12 @@ def apply_ui_masks(sub, masks, origin=(0, 0)):
 
 
 def find_web_bbox(frame, pad_frac=CROP_PAD_FRAC, resolution=None):
-    """auto-locate the bloodweb's bounding box by ocr-ing fixed ui anchor labels, so detection can be
-    cropped to the web (keeping stray ui icons like settings/friends/prestige out of the node
-    detector). anchors, stable per resolution: 'SHARED PERKS' marks the web's left edge + top,
-    'SPEND BLOODPOINTS' the right edge, 'BACK [ESC]' the bottom. returns (bbox, masks): bbox is
-    (x0, y0, x1, y1) in full-frame pixels, or None when too few anchors are found (caller then uses
-    the full frame); masks is a list of _ui_masks rects (full-frame px) the caller blanks out via
-    apply_ui_masks so the shared-perks row and spend button never register as nodes.
-    left/top/right pad OUTWARD; the bottom pads INWARD, because the settings/friends icon row sits
-    just below the BACK button and an outward pad would re-include exactly those stray icons.
-    frame is the full bgr grab (h, w, 3). resolution (a Resolution, default
-    Resolution.from_frame(frame)) supplies the anchor search zones."""
+    """auto-locate the bloodweb's bbox by ocr-ing fixed ui anchors, cropping out stray ui icons.
+    anchors: 'SHARED PERKS' = left edge + top, 'SPEND BLOODPOINTS' = right-edge floor (unreliable off
+    baseline aspect, backstopped by web diameter below), 'BACK [ESC]' = bottom.
+    returns (bbox, masks): bbox is (x0,y0,x1,y1) full-frame px or None if anchors are missing (caller
+    falls back to full frame); masks are _ui_masks rects blanked via apply_ui_masks.
+    bottom pads INWARD (icon row sits just below BACK), other edges pad outward."""
     if frame is None:
         return None, []
     resolution = resolution or Resolution.from_frame(frame)
@@ -182,9 +177,13 @@ def find_web_bbox(frame, pad_frac=CROP_PAD_FRAC, resolution=None):
     if None in (left, right, bottom, top_y):
         return None, masks                       # not enough anchors, fall back to the full frame
 
+    # SPEND BLOODPOINTS tracks frame width, not the web (left-anchored, sized off height), so it
+    # undershoots off-baseline. floor it at a full web diameter from the left anchor.
+    right = max(right, left + resolution.web_span_px)
+
     pad = int(pad_frac * h)
     x0, y0 = max(left - pad, 0), max(top_y - pad, 0)
-    x1, y1 = min(right + pad, w), min(bottom - pad, h)  # bottom pads inward, clearing the icon row
+    x1, y1 = min(int(right) + pad, w), min(bottom - pad, h)  # bottom pads inward, clearing the icon row
     if x1 - x0 < 0.2 * w or y1 - y0 < 0.2 * h:
         return None, masks                       # implausibly small, treat as a failed read
     return (x0, y0, x1, y1), masks

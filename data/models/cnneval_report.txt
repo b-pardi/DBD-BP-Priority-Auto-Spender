@@ -1,0 +1,21 @@
+cnneval 2026-07-17 20:25
+
+cnn vs ncc on real labels  (all 210 / independent 148)
+
+set             cnn t1  cnn c50    ncc t1  ncc c50
+all              95.2%    98.1%     76.7%    86.7%
+independent      98.6%   100.0%     75.7%    85.1%
+
+by rarity (independent, top1):
+   common      n= 57  cnn  96.5%  ncc  64.9%
+   uncommon    n= 34  cnn 100.0%  ncc  82.4%
+   rare        n= 25  cnn 100.0%  ncc  80.0%
+   very rare   n=  9  cnn 100.0%  ncc 100.0%
+   ultra rare  n=  1  cnn 100.0%  ncc   0.0%
+   event       n= 22  cnn 100.0%  ncc  81.8%
+
+McNemar (independent): cnn-only-right=34  ncc-only-right=0  p=0.000  -> cnn wins
+
+highest-confidence cnn misses (independent, the ocr-gate slippers):
+   glowingInk         -> furin              s=0.51  ncc:amandasSecret
+   instructions       -> prototypeClaws     s=0.48  ncc:franklinsDemis

@@ -71,7 +71,7 @@ from tqdm import tqdm
 from urllib3.util.retry import Retry
 
 from . import paths
-from .node import dedup_index_rows, normalize_name, row_names
+from .node import dedup_index_rows, demote_dead_art, normalize_name, row_names
 
 API = "https://deadbydaylight.wiki.gg/api.php"
 
@@ -438,11 +438,15 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
     _p("backfilling rarities")
     fill_rarities(index, fetch_module_rarities(session))
 
+    demote_rarityless(index)  # no rarity after both sources = not bloodweb content
+
     # the other names each row answers to (wiki redirects + the name its filename would have given
     # it), so a rename never strands an existing priority rule.
     _p("fetching aliases")
     redirects = fetch_redirects(session, [a for _old, a, _s in aka.values() if a], progress=progress)
     fill_aliases(index, aka, redirects)
+
+    demote_dead_art(index)  # needs descs + aliases filled to prove an orphan's identity
 
     _p("writing index")
     if dedup:
@@ -964,14 +968,8 @@ def fill_sources(rows, surv_types):
         r["side"] = _side(r["category"], r["owner"], r.get("role"), surv_types)
 
 
-# killer names for the ui's per-killer filter. nowhere public carries them: power pages are
-# redirects or bare lua invocations (no extracts, which is also why power rows have no desc), and
-# the killer articles render everything through {{#Invoke:Killers|...}}. what those all render FROM
-# is two lua data modules, fetched here as raw page source: Module:Datatable holds the killers
-# table ({id = 1, name = "Trapper", ...}) and Module:Datatable/Loadout holds p.powers
-# (["Bear Trap"] = {killer = 1, ...}). being the render source they're current the moment a chapter
-# ships -- but they are wiki INTERNALS, not a public api, so the parse is lenient and fails SOFT:
-# an empty map leaves `killer` null everywhere and the ui falls back to its own owner table.
+# killer names come from Module:Datatable + Module:Datatable/Loadout lua sources, since no public
+# page carries them. wiki internals, so parse fails soft (empty map -> ui falls back to its own table).
 
 def _lua_balanced(txt, start):
     """the source slice of one balanced {...} starting at txt[start] == '{'.
@@ -1396,6 +1394,20 @@ def fill_rarities(rows, module_rarities):
         r["rarity"] = rar
         if rar == "event" and r.get("obtainable") == "normal":
             r["obtainable"] = "event"
+
+
+def demote_rarityless(rows):
+    """non-perk rows still lacking a rarity after every fill -> obtainable 'unavailable', in place.
+    a null rarity means it's not real bloodweb content (orphan upload, retired art, in-match pickup);
+    left matchable these steal top-1 from near-identical canonical rows.
+    detect.is_matchable enforces the same rule for indexes scraped before this pass."""
+    n = 0
+    for r in rows:
+        if r.get("category") != "perk" and r.get("rarity") is None \
+                and r.get("obtainable") != "unavailable":
+            r["obtainable"] = "unavailable"
+            n += 1
+    return n
 
 
 def fetch_page_titles(session):

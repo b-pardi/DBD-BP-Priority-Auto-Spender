@@ -1,0 +1,145 @@
+model_diagnose 2026-07-17 22:36  cmd=full
+
+=== library hygiene ===
+index 1648 rows, 1425 matchable, 223 dropped:
+  119 powers, 26 wiki-retired/dead-art, 78 rarity-less non-perk (raw-upload twins / retired art / in-match pickups)
+    artifactER                           artifact ER                              addon
+    bigBuckle                            big Buckle                               addon
+    blackGrease                          black Grease                             addon
+    blackSilkCord                        black Silk Cord                          addon
+    blindWarriorMud_1-0-0                blind Warrior Mud 1-0-0                  addon
+    crystalBead                          crystal Bead                             addon
+    deathEngravings                      death Engravings                         addon
+    diamondStone                         diamond Stone                            addon
+    doomEngravings                       doom Engravings                          addon
+    erodedToken                          eroded Token                             addon
+    glassBead                            glass Bead                               addon
+    gum                                  Gum                                      addon
+    heavyClutch                          heavy Clutch                             addon
+    inhaler                              Inhaler                                  addon
+    iridescentBrick                      iridescent Brick                         addon
+    junkyardAirFilter                    junkyard Air Filter                      addon
+    leafyMash                            leafy Mash                               addon
+    mapAddendum                          map Addendum                             addon
+    mothersHelpers                       mothers Helpers                          addon
+    pighouseGloves                       pighouse Gloves                          addon
+    prayerRope                           prayer Rope                              addon
+    puncturedMuffler                     punctured Muffler                        addon
+    redTwine                             red Twine                                addon
+    scratchedPearl                       scratched Pearl                          addon
+    smashNRunGloves                      Smash 'n' Run Gloves                     addon
+    JerryCan                             Jerry Can                                item
+    LimitedVecnaEye                      Limited Vecna Eye                        item
+    LimitedVecnaHand                     Limited Vecna Hand                       item
+    calamariSmokeBomb                    calamari Smoke Bomb                      item
+    carriedBody                          carried Body                             item
+    emp                                  EMP                                      item
+    fireflyLantern                       firefly Lantern                          item
+    firstAidSpray                        First Aid Spray                          item
+    flashGrenade                         Flash Grenade                            item
+    flashlightHalloween                  flashlight Halloween                     item
+    fragileMirror                        Fragile Mirror                           item
+    glowingFungus                        Glowing Fungus                           item
+    key                                  Keys                                     item
+    keycard                              Keycard                                  item
+    lamentConfiguration                  Lament Configuration                     item
+    modifierLantern                      modifier Lantern                         item
+    pocketMirror                         Pocket Mirror                            item
+    rangersAidKit                        rangers Aid Kit                          item
+    remoteFlameTurret                    Remote Flame Turret                      item
+    rundownAidKit                        rundown Aid Kit                          item
+    toolboxEngineers                     toolbox Engineers                        item
+    toolboxMechanics                     toolbox Mechanics                        item
+    toolboxWornOut                       toolbox Worn Out                         item
+    trapple                              Trapple                                  item
+    vaccine                              Vaccine                                  item
+    vhsTape                              VHS Tape                                 item
+    voidCrystal                          Void Crystal                             item
+    winterEventFirecracker               winter Event Firecracker                 item
+    dustyNoose                           dusty Noose                              offering
+    graduationCap                        graduation Cap                           offering
+    petrifiedOak_old                     petrified Oak old                        offering
+    shroudOfBinding                      shroud Of Binding                        offering
+    CrossExamination_10.0.0PTB           Cross Examination 10.0.0 PTB             perk
+    DesperateFocus                       Desperate Focus                          perk
+    LendaHand_10.0.0PTB                  Lenda Hand 10.0.0 PTB                    perk
+    ToyWithThem                          Toy With Them                            perk
+    WideOpenThrottle_10.0.0PTB           Wide Open Throttle 10.0.0 PTB            perk
+    correctiveAction_originalIcon        corrective Action original Icon          perk
+    deadlock                             deadlock                                 perk
+    fireUp_noLicense                     fire Up no License                       perk
+    guardian                             guardian                                 perk
+    innerHealing                         inner Healing                            perk
+    rememberMe_noLicense                 remember Me no License                   perk
+    renewal                              renewal                                  perk
+    saboteur_old                         saboteur old                             perk
+    saveTheBestForLast                   save The Best For Last                   perk
+    scourgeHookGiftOfPain                scourge Hook Gift Of Pain                perk
+    self-Preservation_4.6.0-9.4.2        self-Preservation 4.6.0-9.4.2            perk
+    situationalAwareness                 situational Awareness                    perk
+    slipperyMeat_old                     slippery Meat old                        perk
+    smallGame_old                        small Game old                           perk
+    soleSurvivor                         sole Survivor                            perk
+    vigil_noLicense                      vigil no License                         perk
+
+  2 matchable rows with no desc (article-less, likely dead art; kept, verify before pruning):
+    banquetPoison                        banquet Poison                           item/event
+    hiddenPerk                           hidden Perk                              perk/None
+matchable library: 1425/1648 rows (223 unmatchable dropped)
+
+=== anchor-anchor landscape (n=1425) ===
+nearest-anchor sim: median 0.552  p90 0.673  p99 0.840  max 0.980
+  anchors with a neighbor > 0.90: 6
+  anchors with a neighbor > 0.80: 31
+  anchors with a neighbor > 0.70: 93
+  anchors with a neighbor > 0.65: 204
+  anchors with a neighbor > 0.60: 398
+
+top 30 most-similar anchor pairs (the intrinsically confusable set):
+  0.980  advancedMovementPrediction [addon/very rare]  <-> geographicalReadout [addon/very rare]
+  0.977  clearReagent [offering/common]                <-> faintReagent [offering/common]
+  0.973  franksMixTape [addon/very rare]               <-> franksMixtape_1 [addon/very rare]
+  0.891  kindred [perk/None]                           <-> objectOfObsession [perk/None]
+  0.888  ebonyMementoMori [offering/ultra rare]        <-> ivoryMementoMori [offering/rare]
+  0.868  advancedMovementPrediction [addon/very rare]  <-> low-PowerMode [addon/uncommon]
+  0.866  dejaVu [perk/None]                            <-> kindred [perk/None]
+  0.852  secondaryCoil [addon/rare]                    <-> strongCoilSpring [addon/common]
+  0.840  blink-White [addon/rare]                      <-> swiftHunt-White [addon/rare]
+  0.833  paddedJaws [addon/common]                     <-> rustedJaws [addon/rare]
+  0.832  CeramicChalice [offering/uncommon]            <-> WoodenChalice [offering/common]
+  0.827  disciplineClassII [addon/uncommon]            <-> disciplineClassIII [addon/rare]
+  0.824  geographicalReadout [addon/very rare]         <-> low-PowerMode [addon/uncommon]
+  0.823  blink-Mud [addon/uncommon]                    <-> swiftHunt-Mud [addon/uncommon]
+  0.823  heavyDutyBattery [addon/uncommon]             <-> longLifeBattery [addon/rare]
+  0.818  battery [addon/common]                        <-> heavyDutyBattery [addon/uncommon]
+  0.808  emergencyMedKit [item/rare]                   <-> firstAidKit [item/uncommon]
+  0.805  allSeeing-Spirit [addon/ultra rare]           <-> blindWarrior-Spirit [addon/ultra rare]
+  0.782  artefactHunter [perk/None]                    <-> toughRunner [perk/None]
+  0.782  blindWarrior-Blood [addon/very rare]          <-> shadowDance-Blood [addon/very rare]
+  0.775  restraintClassII [addon/uncommon]             <-> restraintClassIII [addon/rare]
+  0.762  LoversPostcard [offering/ultra rare]          <-> StampedPostcard [offering/very rare]
+  0.758  shinyCoin [offering/very rare]                <-> tarnishedCoin [offering/uncommon]
+  0.755  devoutSpottedOwlWreath [offering/uncommon]    <-> devoutTanagerWreath [offering/uncommon]
+  0.752  toolbox [item/uncommon]                       <-> wornOutTools [item/common]
+  0.750  grislyChains [addon/rare]                     <-> rustedChains [addon/very rare]
+  0.749  fragrantCrispleafAmaranth [offering/rare]     <-> freshCrispleafAmaranth [offering/uncommon]
+  0.747  BlackTea [offering/common]                    <-> MilkTea [offering/uncommon]
+  0.747  dejaVu [perk/None]                            <-> objectOfObsession [perk/None]
+  0.745  blindWarrior-Soot [addon/common]              <-> theHound-Soot [addon/common]
+matchable library: 1425/1648 rows (223 unmatchable dropped)
+
+=== real queries (all sources) ===
+scored 210  top1 95.2%
+self-score (q . own anchor): hits median 0.910 | misses median 0.316
+
+miss census (10), most confident first; >= 0.65 would be TRUSTED live (wrong buy risk), below it routes to ocr (hover cost only):
+  faintReagent           -> clearReagent           win=0.923 self=0.921 rank#2     anchor-sim=0.977  near-dup    ABOVE-GATE  rar=uncommon
+  velvetFabric           -> cleanRag               win=0.908 self=0.237 rank#92    anchor-sim=0.357  query-drift ABOVE-GATE  rar=common
+  masqueradeToolbox      -> banquetToolbox         win=0.847 self=0.367 rank#12    anchor-sim=0.443  query-drift ABOVE-GATE  rar=event
+  shroudOfUnion          -> shroudOfSeparation     win=0.790 self=0.723 rank#2     anchor-sim=0.616  near-dup    ABOVE-GATE  rar=uncommon
+  escapeCake             -> 10thAnniversary        win=0.747 self=0.264 rank#110   anchor-sim=0.546  query-drift ABOVE-GATE  rar=event
+  BlankPostcard          -> blondHair              win=0.539 self=-0.053 rank#854   anchor-sim=-0.014  query-drift ocr  rar=common
+  10thAnniversary        -> wornOutTools           win=0.534 self=0.507 rank#3     anchor-sim=0.414  ranking     ocr  rar=event
+  10thAnniversary        -> wornOutTools           win=0.532 self=0.523 rank#2     anchor-sim=0.414  ranking     ocr  rar=event
+  glowingInk             -> furin                  win=0.508 self=0.017 rank#545   anchor-sim=-0.020  query-drift ocr  rar=common
+  instructions           -> prototypeClaws         win=0.483 self=0.208 rank#103   anchor-sim=0.263  query-drift ocr  rar=common

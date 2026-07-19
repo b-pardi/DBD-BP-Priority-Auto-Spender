@@ -209,9 +209,13 @@ def check_bank_integrity():
 
 
 def check_library_hygiene():
-    """duplicate-identity guard: no two matchable anchors should embed nearly identically.
-    twin rows sit at cosine 0.95+, closest legit pair sits ~0.74, so 0.95 splits them cleanly.
-    a warn means the library grew a duplicate the demote rules don't cover yet."""
+    """duplicate-identity guard: no two matchable anchors should be the SAME item twice.
+    high embedding similarity ALONE isn't the signal -- distinct game items reuse art (the -White/-Blood
+    addon variants, clearReagent/faintReagent, advancedMovementPrediction/geographicalReadout all embed
+    0.95+ yet are legit, and the near-dup veto OCRs them at runtime). a real dup is a high-sim pair that
+    also SHARES IDENTITY (same category + equal folded name or word-set), exactly what dedup_index_rows
+    merges -- warn only on those, so a legit near-dup no longer false-alarms."""
+    from .node import normalize_name, _name_wordset
     rows = detect.load_rows()
     if not rows:
         return "skip", "no icon library yet"
@@ -223,12 +227,21 @@ def check_library_hygiene():
     S = B @ B.T
     np.fill_diagonal(S, -2.0)
     i, j = np.unravel_index(int(np.argmax(S)), S.shape)
-    top = float(S[i, j])
-    detail = (f"{len(keep)}/{len(rows)} rows matchable; closest anchor pair "
-              f"{rows[keep[i]]['key']} <-> {rows[keep[j]]['key']} at cos {top:.3f}")
-    if top > 0.95:
-        return "warn", detail + " — duplicate rows? refresh the icon library"
-    return "pass", detail
+    closest = (f"{len(keep)}/{len(rows)} rows matchable; closest anchor pair "
+               f"{rows[keep[i]]['key']} <-> {rows[keep[j]]['key']} at cos {float(S[i, j]):.3f}")
+    # a true dup shares identity, not just art: scan the high-sim pairs for one dedup would merge.
+    iu = np.triu_indices(len(keep), 1)
+    dups = []
+    for p in np.where(S[iu] >= 0.95)[0]:
+        a, b = rows[keep[iu[0][p]]], rows[keep[iu[1][p]]]
+        if a.get("category") == b.get("category") and (
+                normalize_name(a.get("name")) == normalize_name(b.get("name"))
+                or _name_wordset(a.get("name")) == _name_wordset(b.get("name"))):
+            dups.append(f"{a['key']} <-> {b['key']} ({float(S[iu[0][p], iu[1][p]]):.3f})")
+    if dups:
+        return "warn", (f"{len(keep)}/{len(rows)} matchable; duplicate identity in library: "
+                        f"{', '.join(dups)} — extend dedup_index_rows / refresh the icon library")
+    return "pass", closest + " (legit near-dup, OCR'd by the near-dup veto)"
 
 
 def check_resolution_anchoring():

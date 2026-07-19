@@ -27,6 +27,7 @@ ENTITY_SETTLE_S = 0.4  # smoke-render wait before the post-buy state re-read (la
 PRESENCE_THRESH_DEFAULT = detect.PRESENCE_THRESH
 RESCUE_MIN_DEFAULT = node.CNN_RESCUE_MIN
 RESCUE_MARGIN_DEFAULT = node.CNN_RESCUE_MARGIN
+NEARDUP_VETO_DEFAULT = node.NEARDUP_VETO
 
 # config-key -> default value for everything the settings screen owns. keep in sync with the widgets
 # in ui/screens/settings.py; the restore button walks exactly this map.
@@ -45,6 +46,7 @@ DEFAULT_SETTINGS = {
     "presence_thresh": PRESENCE_THRESH_DEFAULT,
     "matcher_rescue_min": RESCUE_MIN_DEFAULT,
     "matcher_rescue_margin": RESCUE_MARGIN_DEFAULT,
+    "matcher_neardup_veto": NEARDUP_VETO_DEFAULT,
     # match pool (exclusive is a strict subset of inferred, so the ui forces inferred on with it)
     "pool_inferred": True,
     "pool_exclusive": False,

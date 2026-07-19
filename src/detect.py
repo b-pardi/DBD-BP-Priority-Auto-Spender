@@ -431,14 +431,20 @@ def load_cnn_bank(rows, index_path=DEFAULT_INDEX):
 def id_icon_cnn(icon_bgr, rows, bank, net, pool=None):
     """learned metric matcher: embed the query glyph, take the nearest cosine over the cached sprite-embedding bank (bank (n,128) l2-normed aligned to rows, net the cv2.dnn encoder).
     pool masks out-of-pool rows like id_icon_ncc.
-    returns (row, score, margin, runner_up_row); score = cosine in [-1,1] (HIGHER better)."""
+    returns (row, score, margin, runner_up_row, runner_up_sim); score = cosine in [-1,1] (HIGHER
+    better), runner_up_sim = anchor cosine between the top two rows for the near-dup veto (None when
+    the runner-up is out-of-pool, i.e. there is no real 2nd candidate to be confused with)."""
     q = _cnn_embed(net, icon_bgr)
     scores = bank @ q                                              # (n,) cosine, both l2-normed
     if pool is not None:
         scores = np.where(pool, scores, -2.0)                      # below the min possible cosine
     order = np.argsort(-scores)
-    return (rows[order[0]], float(scores[order[0]]),
-            float(scores[order[0]] - scores[order[1]]), rows[order[1]])
+    i0, i1 = order[0], order[1]
+    # anchor-anchor cosine of the top two = how intrinsically confusable they are, independent of
+    # this query's noise; only meaningful when the runner-up is in-pool (masked rows sit at -2.0).
+    runner_sim = float(bank[i0] @ bank[i1]) if scores[i1] > -1.5 else None
+    return (rows[i0], float(scores[i0]),
+            float(scores[i0] - scores[i1]), rows[i1], runner_sim)
 
 
 def _crop_glyph_from_frame(frame, x, y, r, r_tol=1):
@@ -1317,8 +1323,9 @@ def detect(
 
         # identify the glyph against the full matchable library (unavailable excluded);
         # socket shape is cross-checked downstream, not used to prune candidates here.
+        runner_sim = None                                          # cnn-only, for the near-dup veto
         if matcher == "cnn":
-            best_match_row, score, margin, runner = id_icon_cnn(glyph, rows, cnn_bank, cnn_net, pool=matchable)
+            best_match_row, score, margin, runner, runner_sim = id_icon_cnn(glyph, rows, cnn_bank, cnn_net, pool=matchable)
         elif matcher == "ncc":
             best_match_row, score, margin, runner = id_icon_ncc(glyph, rows, ncc_plain_T, pool=matchable)
         elif matcher == "ncc_masked":
@@ -1338,6 +1345,7 @@ def detect(
             'glyph_bgr': glyph,
             'match': best_match_row, 'score': score, 'margin': margin, 'matcher': matcher,
             'runner_up': runner.get('name') or runner.get('key'),  # 2nd-best, debug-only
+            'runner_up_sim': runner_sim,  # top1<->top2 anchor cos, cnn near-dup veto (None otherwise)
         })
     return res
 

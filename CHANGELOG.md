@@ -11,8 +11,15 @@
 - fixed glyph extraction mis-crop that was the deeper focus lens -> saboteur cause
     - the addon '+' marker survived the brightness cut at the plate edge, stretched the glyph bbox and shoved faint icons off-center
     - real match accuracy 91.4% -> 94.8% (98.6% on independent labels) before any retrain
-- synth training renders now mimic real nodes much closer: semi-transparent art, plate brightness wobble, game-scale uncropped icons, slight art shift/zoom, '+' marker drawn on top at either corner; all cli-tunable for retrains
-- new model diagnostics: dashboard png (training curves, score landscape, rescue-gate sweep) via tools/model_diagnose; eval + diagnose reports now also saved to data/models
+- synth training renders now mimic real nodes much closer:
+    - semi-transparent art
+    - plate brightness wobble
+    - game-scale uncropped icons
+    - slight art shift/zoom
+    - (fix) '+' marker drawn on top
+- new model diagnostics
+- added a matcher veto to auto default to ocr for glyphs that have very similar pairs (e.g. murky reagent and clear reagent)
+- removed a leftover duplicate icon row and fixed scraper so it don't do that shit again
 
 ### v0.3.2-beta
 - fixed stale cache issue leading to over reliance on ocr fallback

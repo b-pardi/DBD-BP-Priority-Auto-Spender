@@ -49,6 +49,13 @@ PHASH_MAX_HAM = 10
 CNN_RESCUE_MIN = 0.55
 CNN_RESCUE_MARGIN = 0.15
 CNN_MARGIN_CAP = 1.0
+# near-dup veto: when the top-2 library anchors are this close in embedding space the model can't
+# separate them, so a high win score is meaningless -- route the node to ocr for ground truth
+# instead of auto-buying. checked at runtime off the live bank (detect stashes runner_up_sim = the
+# top1<->top2 anchor cosine), so new near-dup pairs from a re-scrape or retrain are caught with no
+# per-pair list to maintain. 0.95 sits above the separable-but-similar cluster (~0.89) and below the
+# true twins (0.97+, e.g. faintReagent<->clearReagent 0.977). only bites when the runner-up is real.
+NEARDUP_VETO = 0.95
 # ncc/phash margin floors: logged only, never gated (see runner_up).
 NCC_MARGIN_MIN = 0.03
 PHASH_MARGIN_MIN = 2
@@ -61,6 +68,13 @@ def set_rescue_gate(min_score=CNN_RESCUE_MIN, margin=CNN_RESCUE_MARGIN):
     global CNN_RESCUE_MIN, CNN_RESCUE_MARGIN
     CNN_RESCUE_MIN = float(min_score)
     CNN_RESCUE_MARGIN = float(margin)
+
+
+def set_neardup_veto(sim=NEARDUP_VETO):
+    """runtime override of the near-dup veto threshold from config (settings ui:
+    matcher_neardup_veto), so it can be tuned live as the library or model shifts. 1.0 disables it."""
+    global NEARDUP_VETO
+    NEARDUP_VETO = float(sim)
 
 
 def tier_rules(tier):
@@ -130,11 +144,19 @@ def _name_wordset(name):
     return frozenset(re.findall(r'[a-z0-9]+', (name or '').lower()))
 
 
+# the scraper's collision suffix for a key uploaded twice ('franksMixtape_1'); its presence marks
+# the raw-upload twin, so on an otherwise-even dedup tie the un-suffixed canonical row wins.
+_RAW_UPLOAD_SUFFIX = re.compile(r'_\d+$')
+
+
 def _row_informativeness(row):
     """rank an index row by how much metadata it carries, so dedup keeps the richest copy.
     the alias uploads come in with rarity null and an empty desc, because their swapped name
-    misses the wiki rarity-category and page-title lookups, so the canonical row outranks them."""
-    return (row.get('rarity') is not None, bool(row.get('desc')))
+    misses the wiki rarity-category and page-title lookups, so the canonical row outranks them.
+    the last term only breaks true ties (equal rarity+desc, like a twin that also grew an article):
+    prefer the key without the raw-upload _<n> suffix."""
+    return (row.get('rarity') is not None, bool(row.get('desc')),
+            not _RAW_UPLOAD_SUFFIX.search(row.get('key') or ''))
 
 
 # trailing tokens dead-art filenames carry ('saboteur_old', 'vigil_noLicense', 'LendaHand_10.0.0PTB');
@@ -190,14 +212,19 @@ def dedup_index_rows(rows, near_ham=10):
 
     two passes, both scoped per category so a chance cross-category hash collision isn't merged:
       1. exact phash duplicates (the wiki serves a byte-identical sprite under several filenames).
-      2. near-dup swapped-word aliases: same category, same name word-set, phashes within near_ham
-         bits. the wiki uploads one sprite under both word orders (sportFlashlight vs flashlightSport),
-         which pass 1 misses since the two uploads aren't byte-identical (hamming ~2-6). near_ham=10
-         sits above that real-dup spread and below distinct same-word-set sprites (~28), so only true
-         aliases merge.
+      2. near-dup art under a shared identity signal, phashes within near_ham bits. two near-zero-risk
+         identity signals, either one merges:
+           a. same word-set: the wiki uploads one glyph under both word orders (sportFlashlight vs
+              flashlightSport), which pass 1 misses (the uploads aren't byte-identical, hamming ~2-6).
+           b. same folded name: a raw-upload twin keeps the name but tokenizes differently, so its
+              word-set diverges ('franks mix tape' vs 'franks mixtape') even while normalize_name
+              folds both to 'franksmixtape'. this is the case that let franksMixtape_1 survive as a
+              matchable false anchor (it even grew its own article/desc, so demote_dead_art skipped it).
+         near_ham=10 sits above the real-dup spread (~2-6) and below distinct same-word-set sprites
+         (~28), and two DISTINCT game items never share a folded name, so only true twins merge.
 
-    keeps the richest row per group (rarity known, then desc present), i.e. the canonical name; the
-    bare alias (null rarity, empty desc) is dropped. order preserved."""
+    keeps the richest row per group (rarity known, then desc present, then the un-suffixed canonical
+    key), i.e. the canonical name; the twin is dropped. order preserved."""
     drop = set()
     # pass 1: exact phash, any name
     by_hash = {}
@@ -210,20 +237,27 @@ def dedup_index_rows(rows, near_ham=10):
             lose = r if _row_informativeness(r) <= _row_informativeness(keep) else keep
             by_hash[key] = keep if lose is r else r
             drop.add(id(lose))
-    # pass 2: near phash, only within same category + same word-set (a near-zero-risk signal)
-    by_wordset = {}
-    for r in rows:
-        if id(r) in drop:
-            continue
-        by_wordset.setdefault((r.get('category'), _name_wordset(r.get('name'))), []).append(r)
-    for (cat, ws), group in by_wordset.items():
-        if len(group) < 2 or not ws:
-            continue
-        group.sort(key=_row_informativeness, reverse=True)
-        anchor = group[0]
-        for other in group[1:]:
-            if _phash_hamming(anchor['phash'], other['phash']) <= near_ham:
-                drop.add(id(other))
+
+    # pass 2: near phash within a shared identity bucket (word-set, then folded name)
+    def _merge_near(key_of):
+        buckets = {}
+        for r in rows:
+            if id(r) in drop:
+                continue
+            k = key_of(r)
+            if k:
+                buckets.setdefault((r.get('category'), k), []).append(r)
+        for group in buckets.values():
+            if len(group) < 2:
+                continue
+            group.sort(key=_row_informativeness, reverse=True)
+            anchor = group[0]
+            for other in group[1:]:
+                if _phash_hamming(anchor['phash'], other['phash']) <= near_ham:
+                    drop.add(id(other))
+
+    _merge_near(lambda r: _name_wordset(r.get('name')))
+    _merge_near(lambda r: normalize_name(r.get('name')))
     return [r for r in rows if id(r) not in drop]
 
 
@@ -259,6 +293,7 @@ class Node:
     margin: float = 0.0
     matcher: str = 'ncc'
     runner_up: str = None   # 2nd-best match name; debug-only diagnostic for near-tie margins
+    runner_up_sim: float = None  # cnn top1<->top2 anchor cosine; drives the near-dup veto (see near_dup)
 
     # provenance of the final identity, the loop sets this to 'ocr' after a hover scan.
     resolved_by: str = 'match'   # 'match' | 'ocr'
@@ -296,6 +331,7 @@ class Node:
             margin=float(d.get('margin', 0.0)),
             matcher=d.get('matcher', 'ncc'),
             runner_up=d.get('runner_up'),
+            runner_up_sim=d.get('runner_up_sim'),
             glyph_bgr=d.get('glyph_bgr'),
         )
 
@@ -328,17 +364,26 @@ class Node:
                 and CNN_RESCUE_MARGIN <= self.margin <= CNN_MARGIN_CAP)
 
     @property
+    def near_dup(self):
+        """are the top-2 anchors too close to trust the winner (see NEARDUP_VETO)?
+        a wrong-buy veto: overrides both the score gate and the rescue, forcing ocr. cnn-only, and
+        only when the runner-up was a real in-pool candidate (runner_up_sim None otherwise)."""
+        return (self.matcher == 'cnn' and self.runner_up_sim is not None
+                and self.runner_up_sim >= NEARDUP_VETO)
+
+    @property
     def confident(self):
         """is the icon match strong enough to trust on its own?
         direction depends on the matcher (ncc higher=better, phash lower=better).
         cnn takes a 2-d gate: a high score, OR a mid score whose runner-up is far behind
-        (see cnn_rescued). ncc/phash stay score-only."""
+        (see cnn_rescued), UNLESS the top two are near-dups (near_dup vetoes both). ncc/phash
+        stay score-only."""
         if self.match is None:
             return False
         if self.matcher == 'phash':
             return self.score <= PHASH_MAX_HAM
         if self.matcher == 'cnn':
-            return self.score >= CNN_CONF_MIN or self.cnn_rescued
+            return (self.score >= CNN_CONF_MIN or self.cnn_rescued) and not self.near_dup
         return self.score >= NCC_CONF_MIN  # ncc / ncc_masked
 
     @property

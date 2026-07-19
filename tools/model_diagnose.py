@@ -9,6 +9,7 @@ subcommands (default = landscape+real+hygiene):
   landscape   anchor-anchor cosine over the matchable library, nn-sim distribution + closest pairs
   real        every real label re-embedded: top1, self-score, true-rank, classified miss census
   hygiene     rows detect.is_matchable rejects, grouped by reason
+  suspects    eval labels whose crop disagrees with the label (bad ground truth), --save montage
   pair A B    one suspect pair, anchor sim + mutual rank, e.g. `pair focusLens saboteur`
   plots       post-retrain dashboard png (training curves + gate landscape) + rescue sweep table
 
@@ -35,6 +36,8 @@ import tools.eval_matchers as EM
 # self-score = the query itself drifted (extraction problem)
 NEARDUP_SIM = 0.60
 DRIFT_SELF = 0.50
+# self-score below this = the crop resembles nothing (a garbage capture / junk label)
+JUNK_SELF = 0.10
 
 
 def load_bank():
@@ -148,6 +151,60 @@ def cmd_real(args):
         gate = "ABOVE-GATE" if win >= CNN_CONF_MIN else "ocr"
         print(f"  {want:22s} -> {got:22s} win={win:.3f} self={self_s:.3f} rank#{true_rank:<5d} "
               f"anchor-sim={pair:.3f}  {family:11s} {gate}  rar={rec.get('rarity')}")
+
+
+def cmd_suspects(args):
+    """flag eval labels whose OWN crop disagrees with the label, so bad ground truth stops polluting
+    the real-accuracy bar. self-score = query . its own labeled anchor; low = the pixels don't look
+    like what the label claims. source trust decides the verdict, not the score alone (a human/tooltip
+    label is never told to delete itself); all verdicts are runtime-derived, no maintained list:
+      JUNK     matcher-sourced + self < JUNK_SELF -> an old matcher's guess that matches nothing and
+               has no confident correct read; delete the record.
+      RELABEL  matcher-sourced (unverified) + JUNK_SELF <= self < DRIFT_SELF -> a real item the old
+               matcher keyed wrong; view the crop and fix it (often to the model's guess below).
+      drift    ocr/manual truth (tooltip/human-verified) + self < DRIFT_SELF -> label KEPT; a genuine
+               extraction/model-drift case for the retrain backlog, NOT a relabel.
+    fix flagged rows in data/labels/real_nodes.json, keyed by crop_path. --save writes a captioned
+    montage of the actionable (JUNK/RELABEL) crops next to the model for quick eyeballing."""
+    rows, net, B = load_bank()
+    flagged = []
+    for rec, s, order, self_s, true_rank in embed_real(rows, net, B):
+        if self_s >= DRIFT_SELF:
+            continue
+        if rec.get("source") == "matcher":       # unverified truth, safe to question
+            verdict = "JUNK" if self_s < JUNK_SELF else "RELABEL"
+        else:                                     # ocr/manual are verified, keep them
+            verdict = "drift"
+        flagged.append((verdict, self_s, float(s[order[0]]), rows[order[0]]["key"], rec))
+    rank = {"JUNK": 0, "RELABEL": 1, "drift": 2}
+    flagged.sort(key=lambda f: (rank[f[0]], f[1]))
+    n_act = sum(1 for f in flagged if f[0] != "drift")
+    print(f"\n=== suspect eval labels (self-score < {DRIFT_SELF}, n={len(flagged)}, "
+          f"actionable {n_act}) ===")
+    print("  fix in data/labels/real_nodes.json (keyed by crop_path): correct 'key', or delete a JUNK record")
+    for verdict, self_s, win, got, rec in flagged:
+        print(f"  [{verdict:7s}] {rec['key']:22s} self={self_s:+.3f} model->{got:22s} win={win:.3f} "
+              f"src={str(rec.get('source')):7s} {rec['crop_path']}")
+    if getattr(args, "save", False) and n_act:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+        act = [f for f in flagged if f[0] != "drift"]
+        cols = min(5, len(act))
+        rowsn = (len(act) + cols - 1) // cols
+        fig, axes = plt.subplots(rowsn, cols, figsize=(3 * cols, 3.2 * rowsn), squeeze=False)
+        for ax in axes.flat:
+            ax.axis("off")
+        for ax, (verdict, self_s, win, got, rec) in zip(axes.flat, act):
+            img = cv2.imread(str(ROOT / rec["crop_path"]))
+            if img is not None:
+                ax.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+            ax.set_title(f"{verdict}: {rec['key']}\nmodel-> {got} ({win:.2f})\nself {self_s:+.2f}",
+                         fontsize=8)
+        ppath = EM.CNN_ONNX.with_name("suspect_labels.png")
+        fig.tight_layout()
+        fig.savefig(str(ppath), dpi=130)
+        print(f"\nmontage -> {ppath}")
 
 
 def cmd_hygiene(_args):
@@ -364,6 +421,8 @@ def main():
     p.add_argument("b")
     p.add_argument("--top", type=int, default=10, help="neighbors to list per side")
     sub.add_parser("hygiene", help="rows is_matchable rejects, grouped by reason")
+    p = sub.add_parser("suspects", help="eval labels whose crop disagrees with the label (bad truth)")
+    p.add_argument("--save", action="store_true", help="write a captioned montage of the actionable crops")
     sub.add_parser("plots", help="dashboard png (training + gate landscape) + rescue sweep table")
     args = ap.parse_args()
     # every report also lands next to the model so a later session can read it without re-running
@@ -375,9 +434,10 @@ def main():
             cmd_hygiene(args)
             cmd_landscape(argparse.Namespace(top=30))
             cmd_real(argparse.Namespace(independent=False, detail=None))
+            cmd_suspects(argparse.Namespace(save=False))
         else:
-            {"landscape": cmd_landscape, "real": cmd_real,
-             "pair": cmd_pair, "hygiene": cmd_hygiene, "plots": cmd_plots}[args.cmd](args)
+            {"landscape": cmd_landscape, "real": cmd_real, "pair": cmd_pair,
+             "hygiene": cmd_hygiene, "suspects": cmd_suspects, "plots": cmd_plots}[args.cmd](args)
     print(f"\nreport -> {rpath}")
 
 

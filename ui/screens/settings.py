@@ -152,6 +152,16 @@ class SettingsScreen(ctk.CTkFrame):
         ctk.CTkLabel(g, text="runner-up gap that lets a mid-score match skip OCR",
                      font=theme.FONT_SMALL, text_color="gray").grid(
             row=5, column=2, sticky="w", padx=theme.PAD)
+        # near-dup veto (node.set_neardup_veto): when the top-2 library icons embed closer than this
+        # the match is sent to OCR no matter how high its score, since the model can't tell them apart.
+        ctk.CTkLabel(g, text="Matcher near-dup veto", anchor="w", width=LABEL_W).grid(
+            row=6, column=0, sticky="w", pady=4)
+        self.neardup_veto = ctk.CTkEntry(g, width=120)
+        self.neardup_veto.insert(0, str(cfg.get("matcher_neardup_veto", spender.NEARDUP_VETO_DEFAULT)))
+        self.neardup_veto.grid(row=6, column=1, sticky="w", pady=4)
+        ctk.CTkLabel(g, text="top-2 similarity that forces OCR (1.0 disables)",
+                     font=theme.FONT_SMALL, text_color="gray").grid(
+            row=6, column=2, sticky="w", padx=theme.PAD)
 
         # --- match pool ---
         # comparison-pool narrowing: only score the library icons the priority list cares about, so
@@ -361,7 +371,9 @@ class SettingsScreen(ctk.CTkFrame):
                                   ("presence_thresh", self.presence, "presence threshold"),
                                   ("matcher_rescue_min", self.rescue_min, "matcher rescue min score"),
                                   ("matcher_rescue_margin", self.rescue_margin,
-                                   "matcher rescue margin")):
+                                   "matcher rescue margin"),
+                                  ("matcher_neardup_veto", self.neardup_veto,
+                                   "matcher near-dup veto")):
             try:
                 cfg[key] = float(entry.get())
             except ValueError:

@@ -27,11 +27,12 @@ from pathlib import Path
 
 from . import capture, detect, input_control, ocr, paths
 from .defaults import (
-    ADVANCE_S, DEFAULT_SETTINGS, ENTITY_SETTLE_S, KILL_KEY, PRESENCE_THRESH_DEFAULT,
-    PRESTIGE_WAIT_S, RESCUE_MARGIN_DEFAULT, RESCUE_MIN_DEFAULT, SETTLE_S, START_KEY,
+    ADVANCE_S, DEFAULT_SETTINGS, ENTITY_SETTLE_S, KILL_KEY, NEARDUP_VETO_DEFAULT,
+    PRESENCE_THRESH_DEFAULT, PRESTIGE_WAIT_S, RESCUE_MARGIN_DEFAULT, RESCUE_MIN_DEFAULT,
+    SETTLE_S, START_KEY,
 )
 from .node import (
-    Node, build_pool_mask, set_rescue_gate, tier_is_ordered, tier_rules,
+    Node, build_pool_mask, set_neardup_veto, set_rescue_gate, tier_is_ordered, tier_rules,
 )
 from .resolution import Resolution
 from .sim import sim_source
@@ -750,6 +751,7 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
     detect.set_presence_thresh(config.get("presence_thresh", PRESENCE_THRESH_DEFAULT))
     set_rescue_gate(config.get("matcher_rescue_min", RESCUE_MIN_DEFAULT),
                     config.get("matcher_rescue_margin", RESCUE_MARGIN_DEFAULT))
+    set_neardup_veto(config.get("matcher_neardup_veto", NEARDUP_VETO_DEFAULT))
     # log the ocr'd status each scan when debugging a threshold/prestige feature, to sanity-check it.
     report_status = debug and (bp_floor or stop_prestige or stop_level or auto_prestige)
     last_center = None   # full-frame (x,y) web center from the last filled scan; the prestige star sits here

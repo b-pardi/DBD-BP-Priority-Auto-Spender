@@ -2,6 +2,9 @@
 
 Spends your bloodpoints way smarter than the current auto spender (at least until Behaviour steals my idea again). **Note** that 'Dry Run' is enabled by default (so behaviour can't sue me probably idk any lawyers dm me) and should be disabled to actually work.
 
+**Important**: If you get error at launch, you may need to disable windows smart screen. This is because windows automatically blocks all python based executables that are certified and certifying is like $500/yr so no thanks. 
+You also may see windows defender block this, just click more info and run anyway
+
 **To run:**
 1. Download the zip folder below.
     - Under the 'Assets' drop down menu at the bottom of this page.

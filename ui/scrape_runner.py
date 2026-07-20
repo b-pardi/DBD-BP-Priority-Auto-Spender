@@ -96,10 +96,9 @@ def run_scrape(app, force=False, on_done=None):
     on success, invalidates caches and calls on_done() on the main thread. returns the window."""
     win = ctk.CTkToplevel(app)
     win.title("Updating icon library")
-    win.geometry("440x160")
+    win.geometry("440x200")
     win.transient(app)
     style_child_window(win)
-    win.protocol("WM_DELETE_WINDOW", lambda: None)  # no closing mid-scrape
     win.after(200, win.grab_set)  # CTkToplevel needs to be viewable before grabbing
     ctk.CTkLabel(
         win, justify="left",
@@ -110,8 +109,22 @@ def run_scrape(app, force=False, on_done=None):
     bar.pack(fill="x", padx=16, pady=8)
     status = ctk.CTkLabel(win, justify="left", text="starting…", text_color="gray")
     status.pack(padx=16, pady=(0, 8), anchor="w")
+    cancel_btn = ctk.CTkButton(win, text="Cancel", width=100)
+    cancel_btn.pack(padx=16, pady=(0, 12), anchor="e")
 
     result = {}
+    cancel = threading.Event()  # cooperative: scrape() checks it between items and stops
+
+    def request_cancel():
+        # the worker notices between items; poll() then tears the window down as usual. the X
+        # goes through here too, so closing the popup can no longer leave the scrape running.
+        if result:
+            return  # already finished; poll() is about to close the window anyway
+        cancel.set()
+        cancel_btn.configure(state="disabled", text="Cancelling…")
+
+    cancel_btn.configure(command=request_cancel)
+    win.protocol("WM_DELETE_WINDOW", request_cancel)
     # latest progress, written by the worker thread's callback and read by poll() on the main
     # thread (tk isn't thread-safe, so the worker never touches widgets, it just updates this dict).
     prog = {"stage": "starting…", "cur": None, "tot": None}
@@ -126,8 +139,10 @@ def run_scrape(app, force=False, on_done=None):
             cats = sorted(set(scraper.PREFIXES.values()))
             index, skipped = scraper.scrape(
                 cats, scraper.DEFAULT_OUT, scraper.DEFAULT_INDEX, force=force,
-                progress=on_progress)
+                progress=on_progress, cancel=cancel)
             result["ok"] = (len(index), len(skipped))
+        except scraper.ScrapeCancelled:
+            result["cancelled"] = True
         except Exception as e:
             result["err"] = f"{type(e).__name__}: {e}"
 
@@ -159,6 +174,12 @@ def run_scrape(app, force=False, on_done=None):
         win.destroy()
         if "err" in result:
             messagebox.showerror("scrape failed", result["err"])
+            return
+        if "cancelled" in result:
+            # same shape as a failure: no cache invalidation, no on_done. the index was never
+            # written, so the library is unchanged; downloads that landed stay cached for next time.
+            messagebox.showinfo("scrape cancelled",
+                                "Icon update cancelled — the icon library was left unchanged.")
             return
         n, skipped = result["ok"]
         invalidate_caches(app)

@@ -1,5 +1,10 @@
 ## Changelog
 
+### v0.3.4-beta
+- removed socket shape reading serving as a reason to fallback to ocr, just log instead
+- fixed killswitch not interrupting ocr reading routine
+- misc ui stuff
+
 ### v0.3.3-beta
 - fixed bug where distance right nodes not detected due to poor bloodweb crop bounds
 - fixed bug where model kept classifying focus lens as saboteur
@@ -10,7 +15,7 @@
     - added an anchor match ranking to test candidate anchors closest to glyph
 - fixed glyph extraction mis-crop that was the deeper focus lens -> saboteur cause
     - the addon '+' marker survived the brightness cut at the plate edge, stretched the glyph bbox and shoved faint icons off-center
-    - real match accuracy 91.4% -> 94.8% (98.6% on independent labels) before any retrain
+    - real match accuracy 91.4% -> 94.8% (98.6% on independent labels) before wany retrain
 - synth training renders now mimic real nodes much closer:
     - semi-transparent art
     - plate brightness wobble

@@ -1,4 +1,4 @@
-## v0.3.3-beta
+## v0.3.4-beta
 
 Spends your bloodpoints way smarter than the current auto spender (at least until Behaviour steals my idea again). **Note** that 'Dry Run' is enabled by default (so behaviour can't sue me probably idk any lawyers dm me) and should be disabled to actually work.
 

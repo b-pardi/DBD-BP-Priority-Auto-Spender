@@ -11,6 +11,10 @@ authoritative live read), category from the matched icon (the only thing that sp
 from addon, both square sockets). when the two disagree or the match is weak, the node is
 flagged needs_resolution so the loop falls back to an ocr tooltip-hover scan to settle
 identity (see ocr.find_node_tooltip), instead of guessing behind a plain confidence gate.
+the one exception is a socket-shape disagreement against a CONFIDENT match: the shape read
+misbins far more often than a confident match is wrong (ring bleed and rarity-aura flood
+turn plates into roi-shaped blobs, measured 2026-07-19 on live frames), so there the match
+wins and the override is only logged (see shape_overridden).
 """
 
 from dataclasses import dataclass, field
@@ -389,11 +393,19 @@ class Node:
     @property
     def category_agrees(self):
         """does the matched category fall within what the socket shape allows?
-        always true under the current pooled detect(), but becomes a real discrepancy
-        signal once detect() stops pooling and matches against the full library."""
+        a real discrepancy signal now that detect() matches against the full library, but a soft
+        one: the shape read itself misbins when ring glow or a rarity aura pollutes the socket
+        blob, so resolution_reasons only lets it route a non-confident match."""
         if self.matched_category is None:
             return False
         return self.matched_category in self.shape_categories
+
+    @property
+    def shape_overridden(self):
+        """did a confident match overrule a disagreeing socket-shape read? log-only signal:
+        the shape read is the weaker side of that argument (see category_agrees), so it never
+        routes a confident match to ocr, but the misread should stay visible in the debug log."""
+        return self.match is not None and self.confident and not self.category_agrees
 
     @property
     def rarity_agrees(self):
@@ -420,13 +432,21 @@ class Node:
                 reasons.append("no icon match")
             elif self.matcher == 'phash':
                 reasons.append(f"weak match (dist {self.score:.0f}>{PHASH_MAX_HAM})")
+            elif self.matcher == 'cnn' and self.near_dup and self.score >= CNN_CONF_MIN:
+                # an above-gate score the near-dup veto rejected: without its own message this
+                # printed as "weak match (score 0.94<0.65)", which reads as nonsense in the log.
+                reasons.append(f"near-dup veto (anchor sim {self.runner_up_sim:.3f} "
+                               f"vs {self.runner_up!r})")
             else:  # ncc / ncc_masked / cnn, higher cosine = better
                 floor = CNN_CONF_MIN if self.matcher == 'cnn' else NCC_CONF_MIN
                 # log the margin too, so a debug line says whether the rescue was even in play
                 gap = f", margin {self.margin:.2f}" if self.matcher == 'cnn' else ""
                 reasons.append(f"weak match (score {self.score:.2f}<{floor}{gap})")
         if self.match is not None:  # disagreement only means something against an actual match
-            if not self.category_agrees:
+            # shape disagreement only routes a NON-confident match: against a confident one the
+            # shape read loses (it misbins under ring bleed / aura flood far more often than a
+            # confident match is wrong) and the loop just logs the override (shape_overridden).
+            if not self.category_agrees and not self.confident:
                 reasons.append(f"category {self.matched_category!r} not valid for {self.socket_shape}")
             if not self.rarity_agrees:
                 reasons.append(f"rarity disagree (icon {self.matched_rarity!r} vs disk {self.rarity!r})")

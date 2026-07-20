@@ -66,6 +66,13 @@ NODE_SHAPE_DICT = { # geometric relationship of node content and node type
     'hexagon': ['offering']
 }
 
+# socket plate radius as a fraction of the ring radius (Resolution.NODE_RADIUS scale), measured off
+# live baseline frames: plate half-width ~33.5px inside ring_r 49.3. isolate_node_contents' roi cap
+# is calibrated for plate-scale radii; feed it a ring-scale one and the roi admits the bronze ring's
+# glow, which the close pass merges into the socket blob and classify_socket then misbins the shape
+# (square plates read as hexagons and vice versa), sending confident matches to a pointless ocr hover.
+PLATE_R_FRAC = 0.68
+
 def _is_nonempty(path):
     return path.is_file() and path.stat().st_size > 0
 
@@ -1297,7 +1304,12 @@ def detect(
         # runner-up rarities only retried when slotted (a lattice slot proves the node is real, so an
         # isolate miss there is just a bad rarity guess; off-lattice it resurrects junk instead).
         cands = node[7] if slot is not None else None
-        rarity, iso, glyph = isolate_node_glyph(frame, x, y, r, cands or [rarity], r_tol=r_tol)
+        # slotted r is ring-scale BY DESIGN: snap_to_lattice hands every snapped node the calibrated
+        # NODE_RADIUS*scale and recover_missed_slots hands back ring_r, so no slotted node carries a
+        # plate-scale radius (only off-lattice contour circles do). clamp to plate scale for isolate
+        # (see PLATE_R_FRAC), keeping the raw r for anything ring-relative.
+        r_iso = min(r, int(round(PLATE_R_FRAC * ring_r))) if ring_r else r
+        rarity, iso, glyph = isolate_node_glyph(frame, x, y, r_iso, cands or [rarity], r_tol=r_tol)
         if iso is None:
             if debug: print("WARNING: detect() - Node skipped, no rarity hypothesis could isolate a glyph")
             continue

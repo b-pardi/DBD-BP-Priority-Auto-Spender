@@ -407,12 +407,20 @@ def _log_scan_summary(nodes):
     if taken:
         bought = sum(1 for n in taken if n.state == detect.STATE_BOUGHT)
         pooled_str += f", {bought} bought + {len(taken) - bought} entity-eaten (skipped)"
+    # confident matches whose socket-shape read disagreed: the match won (no ocr routed), but the
+    # shape misread stays visible here so a drift in the shape classifier doesn't hide behind it.
+    overridden = [n for n in scored if n.shape_overridden]
+    if overridden:
+        pooled_str += f", {len(overridden)} shape-overridden"
     print(f"[scan] {len(real)} nodes (+{ncenter} center): "
           f"{len(scored) - len(need)} trusted, {len(need)} -> ocr{pooled_str} | reasons: {summary}")
+    for n in overridden:
+        print(f"[scan]   shape override {_node_tag(n)}: socket read {n.socket_shape!r}, "
+              f"trusting the {n.matched_category!r} match")
 
 
 def resolve_uncertain(nodes, frame, region, rows, debug=False, hover_delay_s=None,
-                      weak_match_fallback=True):
+                      weak_match_fallback=True, switch=None):
     """settle identity for nodes flagged needs_resolution via an ocr hover scan.
     a node is trusted when its observed reads and matched icon agree and the match is confident,
     otherwise we hover it and read the name tooltip rather than guess.
@@ -422,10 +430,16 @@ def resolve_uncertain(nodes, frame, region, rows, debug=False, hover_delay_s=Non
     hover_delay_s is the tooltip fade-in wait before the read; None uses ocr's default (raise it from
     the settings ui if reads fail because the tooltip hadn't appeared yet).
     when debug, log each routed node's reason and the ocr outcome (see also _log_scan_summary).
+    switch (a Switch, optional) lets the panic or pause key abort mid-scan: each hover moves the
+    mouse and pays the tooltip wait, so a web full of uncertain nodes would otherwise keep hovering
+    long after a kill or pause landed. safe to cut short on a pause: the paused loop never reaches
+    the pick stage, and the resume's fresh scan re-resolves whatever was left unhovered.
     """
     if frame is None:
         return nodes
     for n in nodes:
+        if switch is not None and not switch.running:
+            break                        # kill or pause landed mid-scan: stop hovering, caller bails
         if not n.needs_resolution:
             continue
         if debug:
@@ -570,31 +584,44 @@ def _reached_level_goal(prestige, level, stop_prestige, stop_level):
 
 
 def do_prestige(center_xy, frame, region, hold_s=0.05, prestige_wait_s=PRESTIGE_WAIT_S,
-                advance_s=ADVANCE_S, ok_tries=8, ok_wait_s=1.0):
+                advance_s=ADVANCE_S, ok_tries=8, ok_wait_s=1.0, switch=None):
     """prestige the character: click the star at center_xy, then dismiss the REWARDS UNLOCKED screen.
     center_xy is the full-frame web center remembered from the filled level-50 web (the prestige star
     sits there; the empty prestige screen's own center read is unreliable, so we reuse the good one).
     clicks the star, waits prestige_wait_s for the animation before the rewards OK button appears,
     polls for that OK button (ocr) and clicks it, then waits advance_s (the bloodweb transition timer)
     for the fresh level-1 web and parks off-web. live only.
+    switch (a Switch, optional) makes every wait wake early on a kill, stops the OK polling, and
+    skips the park, so the panic key doesn't leave the run clicking or moving the mouse.
     """
+    def _wait(s):
+        # same duration either way; with a switch the sleep wakes early on a kill
+        if switch is None:
+            time.sleep(s)
+        else:
+            _interruptible_sleep(switch, s)
+
     sx, sy = capture.frame_to_screen(int(center_xy[0]), int(center_xy[1]), region)
     input_control.click_node(sx, sy, hold_s=hold_s)
-    time.sleep(prestige_wait_s)   # animation plays out before the rewards OK button shows up
+    _wait(prestige_wait_s)   # animation plays out before the rewards OK button shows up
     for _ in range(ok_tries):
+        if switch is not None and switch.killed:
+            return   # kill landed while polling the rewards screen: no more grabs or clicks
         f, reg = capture.grab_with_region(region)
         ok = ocr.find_ok_button(f)
         if ok is not None:
             ox, oy = capture.frame_to_screen(int(ok[0]), int(ok[1]), reg)
             input_control.click_node(ox, oy, hold_s=hold_s)
             break
-        time.sleep(ok_wait_s)   # rewards screen not up yet, wait and re-check
-    time.sleep(advance_s)   # bloodweb transition timer: let the fresh level-1 web render
+        _wait(ok_wait_s)   # rewards screen not up yet, wait and re-check
+    _wait(advance_s)   # bloodweb transition timer: let the fresh level-1 web render
+    if switch is not None and switch.killed:
+        return   # kill landed during the transition: no park, don't touch the mouse again
 
     park_cursor(frame, region)   # so the next scan's grab holds no hovered tooltip
 
 
-def do_auto_spend(nodes, frame, region, hold_s=0.05, advance_s=ADVANCE_S):
+def do_auto_spend(nodes, frame, region, hold_s=0.05, advance_s=ADVANCE_S, switch=None):
     """no priority left in this web, hand it to dbd's center entity node to finish the level.
     clicking the center auto-completes the remaining buys and advances to the next web.
     targets the is_center node detect tagged by its red glow (find_center_node), falling back to
@@ -603,6 +630,8 @@ def do_auto_spend(nodes, frame, region, hold_s=0.05, advance_s=ADVANCE_S):
     next scan sees the fresh web (detecting a reward/prestige screen instead is a later concern).
     hold_s/advance_s are tuned live like the input_control timings; raise hold_s if dbd needs a
     real press-and-hold to auto-fill rather than a tap.
+    switch (a Switch, optional) makes the transition wait wake early on a kill and skips the park
+    after one, so the panic key doesn't leave the run moving the mouse.
     """
     center = next((n for n in nodes if n.is_center), None)
     if center is not None:
@@ -615,7 +644,12 @@ def do_auto_spend(nodes, frame, region, hold_s=0.05, advance_s=ADVANCE_S):
 
     sx, sy = capture.frame_to_screen(fx, fy, region)
     input_control.click_node(sx, sy, hold_s=hold_s)
-    time.sleep(advance_s)   # let the fill + level transition play out
+    if switch is None:
+        time.sleep(advance_s)   # let the fill + level transition play out
+    else:
+        _interruptible_sleep(switch, advance_s)   # same wait, but a kill wakes it early
+        if switch.killed:
+            return   # kill landed during the transition: no park, don't touch the mouse again
 
     # park AFTER the transition, not before: dbd re-centers the cursor onto the center node while the
     # level loads, so a pre-wait park gets undone (leaving the auto-spend tooltip over the fresh web).
@@ -822,7 +856,7 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
                 else:
                     print("[prestige] level 50 reached, prestiging")
                     do_prestige(last_center, frame, region, prestige_wait_s=prestige_wait_s,
-                                advance_s=advance_s)
+                                advance_s=advance_s, switch=switch)
                 if advance:
                     advance()
             elif debug:
@@ -848,7 +882,8 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
         if debug:
             _log_scan_summary(nodes)
         nodes = resolve_uncertain(nodes, frame, region, rows, debug=debug, hover_delay_s=hover_s,
-                                  weak_match_fallback=config.get("weak_match_fallback", True))
+                                  weak_match_fallback=config.get("weak_match_fallback", True),
+                                  switch=switch)
         if debug and frame is not None:
             annotated = detect.draw_detections(frame, nodes)
             if frame_sink is not None:
@@ -966,7 +1001,7 @@ def run(source, config, switch, rows, click=True, debug=False, frame_sink=None, 
         else:
             if debug:
                 print("[auto-spend] no priorities left, clicking center to finish the web")
-            do_auto_spend(nodes, frame, region, advance_s=advance_s)
+            do_auto_spend(nodes, frame, region, advance_s=advance_s, switch=switch)
         if advance:
             advance()                     # sim draws the next level; live no-op
         _interruptible_sleep(switch, settle_s)

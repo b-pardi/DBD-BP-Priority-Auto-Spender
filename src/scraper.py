@@ -330,11 +330,20 @@ def _index_one(session, url, key, name, category, rarity, obtainable, role,
     }
 
 
+class ScrapeCancelled(Exception):
+    """a caller-requested stop (scrape's `cancel` event). raised between items, so already-downloaded
+    sprites stay cached for the next run but the index is never written from a half-finished pass."""
+
+
 def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False, delay=0.1,
-           dedup=True, progress=None):
+           dedup=True, progress=None, cancel=None):
     # progress is an optional callback(stage, current, total), current/total None for phases with no
     # countable work, so the ui can show a real bar instead of a spinner. cli passes nothing.
+    # cancel is an optional threading.Event; every stage change and per-item tick funnels through _p,
+    # so a set event stops the scrape cooperatively (ScrapeCancelled) without touching the workers.
     def _p(stage, cur=None, tot=None):
+        if cancel is not None and cancel.is_set():
+            raise ScrapeCancelled("scrape cancelled")
         if progress:
             progress(stage, cur, tot)
 
@@ -364,7 +373,8 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
     # filenames collide, its key.
     _p("listing icons")
     files = enumerate_icons(session, prefixes, limit=limit)
-    articles, shared = resolve_articles(session, files, things, progress=progress)
+    # the long sub-phases get _p (not the raw callback) so a cancel lands inside them too
+    articles, shared = resolve_articles(session, files, things, progress=_p)
     keyed = assign_keys(files, articles)
 
     index, skipped = [], []
@@ -416,7 +426,7 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
     # fill the wiki lead-sentence tooltips in one batched pass now that every row's name is known.
     # rows now carry their real article title, so this hits for the ~33 that never matched a page
     # before (and they pick up their rarity and role above for the same reason).
-    fill_descriptions(session, index, progress=progress)
+    fill_descriptions(session, index, progress=_p)
 
     # owner + side, last: owner is parsed from the add-on lead sentence (so it needs desc filled
     # first), and the survivor item types that classify an add-on's side are scraped live here.
@@ -443,7 +453,7 @@ def scrape(categories, out_dir: Path, index_path: Path, limit=None, force=False,
     # the other names each row answers to (wiki redirects + the name its filename would have given
     # it), so a rename never strands an existing priority rule.
     _p("fetching aliases")
-    redirects = fetch_redirects(session, [a for _old, a, _s in aka.values() if a], progress=progress)
+    redirects = fetch_redirects(session, [a for _old, a, _s in aka.values() if a], progress=_p)
     fill_aliases(index, aka, redirects)
 
     demote_dead_art(index)  # needs descs + aliases filled to prove an orphan's identity

@@ -36,6 +36,9 @@ class AppState:
         self.config_error = None  # str if the load failed, surfaced by the ui instead of crashing
         self.library = None       # ui.library.Library, lazy-loaded by the priorities screen
         self.loop = None          # handle to the running spend loop (run screen), None when idle
+        # config snapshot taken when Restore defaults is clicked (one-level undo). lives here, not
+        # on the settings screen, because that screen is destroyed+rebuilt by the restore itself.
+        self.settings_undo = None
         self.load_config()
 
     def load_config(self):

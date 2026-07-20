@@ -105,20 +105,23 @@ class SettingsScreen(ctk.CTkFrame):
         # matching method (cnn is the default learned matcher; ncc/ncc_masked/phash are classical)
         ctk.CTkLabel(g, text="Matching method", anchor="w", width=LABEL_W).grid(
             row=0, column=0, sticky="w", pady=4)
-        self.matcher = ctk.CTkOptionMenu(g, width=180, values=list(detect.MATCHERS))
+        self.matcher = ctk.CTkOptionMenu(g, width=180, values=list(detect.MATCHERS),
+                                         command=self._refresh_dirty)
         self.matcher.set(cfg.get("matcher", "cnn"))
         self.matcher.grid(row=0, column=1, sticky="w", pady=4)
         # binarization method (the thresholding find_circles preprocesses with)
         ctk.CTkLabel(g, text="Binarization method", anchor="w", width=LABEL_W).grid(
             row=1, column=0, sticky="w", pady=4)
         self.thresh = ctk.CTkOptionMenu(
-            g, width=180, values=["adaptive_gaussian", "otsu", "canny"])
+            g, width=180, values=["adaptive_gaussian", "otsu", "canny"],
+            command=self._refresh_dirty)
         self.thresh.set(cfg.get("thresh_method", "adaptive_gaussian"))
         self.thresh.grid(row=1, column=1, sticky="w", pady=4)
         # node-localization method: the contour pass (default) vs opencv HoughCircles (detect.py)
         ctk.CTkLabel(g, text="Node detection", anchor="w", width=LABEL_W).grid(
             row=2, column=0, sticky="w", pady=4)
-        self.node_finder = ctk.CTkOptionMenu(g, width=180, values=["contours", "hough"])
+        self.node_finder = ctk.CTkOptionMenu(g, width=180, values=["contours", "hough"],
+                                             command=self._refresh_dirty)
         self.node_finder.set(cfg.get("node_finder", "contours"))
         self.node_finder.grid(row=2, column=1, sticky="w", pady=4)
         # presence floor: the matched-filter score an empty lattice slot must beat to be recovered
@@ -173,7 +176,7 @@ class SettingsScreen(ctk.CTkFrame):
         self.pool_inferred_var = ctk.BooleanVar(value=bool(cfg.get("pool_inferred", True)))
         self.pool_inferred_sw = ctk.CTkSwitch(
             g, text="Narrow match pool to priority sources (recommended)",
-            variable=self.pool_inferred_var)
+            variable=self.pool_inferred_var, command=self._refresh_dirty)
         self.pool_inferred_sw.grid(row=0, column=0, sticky="w", pady=4)
         self.pool_exclusive_var = ctk.BooleanVar(value=bool(cfg.get("pool_exclusive", False)))
         ctk.CTkSwitch(g, text="Only compare against the priority list (strict)",
@@ -185,7 +188,8 @@ class SettingsScreen(ctk.CTkFrame):
         self.skip_weak_var = ctk.BooleanVar(
             value=not bool(cfg.get("weak_match_fallback", True)))
         ctk.CTkSwitch(g, text="Skip nodes when a weak match's OCR read fails (no icon fallback)",
-                      variable=self.skip_weak_var).grid(row=2, column=0, sticky="w", pady=4)
+                      variable=self.skip_weak_var, command=self._refresh_dirty).grid(
+            row=2, column=0, sticky="w", pady=4)
         self._on_pool_exclusive()   # reflect the loaded config's lock state
 
         # --- spend order ---
@@ -195,7 +199,8 @@ class SettingsScreen(ctk.CTkFrame):
         g = self._group("Spend order", "how the spender breaks ties between equally-ranked nodes")
         self.entity_race_var = ctk.BooleanVar(value=bool(cfg.get("entity_race", False)))
         ctk.CTkSwitch(g, text="Race the entity (buy the most at-risk node first)",
-                      variable=self.entity_race_var).grid(row=0, column=0, sticky="w", pady=4)
+                      variable=self.entity_race_var, command=self._refresh_dirty).grid(
+            row=0, column=0, sticky="w", pady=4)
         ctk.CTkLabel(
             g, font=theme.FONT_SMALL, text_color="gray", anchor="w", justify="left",
             text=("Alters your priorities: when several nodes tie within a tier, the one nearest the\n"
@@ -237,7 +242,7 @@ class SettingsScreen(ctk.CTkFrame):
         g = self._group("Stops & prestige", "live runs only; 0 turns a stop off")
         self.auto_prestige_var = ctk.BooleanVar(value=bool(cfg.get("auto_prestige", False)))
         ctk.CTkSwitch(g, text="Auto-prestige at bloodweb level 50 (spends 20k bp each time)",
-                      variable=self.auto_prestige_var).grid(
+                      variable=self.auto_prestige_var, command=self._refresh_dirty).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=4)
         # wait after clicking the prestige star before the rewards OK button appears
         ctk.CTkLabel(g, text="Prestige animation wait (seconds)", anchor="w", width=LABEL_W).grid(
@@ -272,12 +277,31 @@ class SettingsScreen(ctk.CTkFrame):
         ).pack(fill="x", anchor="w", padx=theme.PAD, pady=theme.PAD)
 
         # pinned Save bar, always reachable no matter how far the body is scrolled. "Restore defaults"
-        # sits on the far side so it can't be fat-fingered in place of Save.
+        # sits on the far side so it can't be fat-fingered in place of Save; Undo restore sits next to
+        # it, enabled only while a pre-restore snapshot exists (one level, cleared once used).
         bar = ctk.CTkFrame(self, fg_color="transparent")
         bar.grid(row=2, column=0, sticky="ew", padx=theme.PAD, pady=theme.PAD)
-        ctk.CTkButton(bar, text="Save settings", command=self._save).pack(side="left")
+        self.save_btn = ctk.CTkButton(bar, text="Save settings", command=self._save)
+        self.save_btn.pack(side="left")
         ctk.CTkButton(bar, text="Restore defaults", command=self._restore_defaults,
                       fg_color=theme.BG_RAISED, hover_color=theme.BLOOD_HI).pack(side="right")
+        self.undo_btn = ctk.CTkButton(
+            bar, text="↺ Undo restore", command=self._undo_restore,
+            fg_color=theme.BG_RAISED, hover_color=theme.BLOOD_HI,
+            state="normal" if self.app.app_state.settings_undo is not None else "disabled")
+        self.undo_btn.pack(side="right", padx=(0, theme.PAD))
+
+        # unsaved-changes star (mirrors the priorities screen): the widgets are compared against a
+        # snapshot of their last-saved values, so the star only shows for a real change and clears
+        # again if the user changes a control back. entries have no command hook, so they report
+        # through a key binding; every other control's command calls _refresh_dirty itself.
+        self._value_entries = (
+            self.presence, self.rescue_min, self.rescue_margin, self.neardup_veto,
+            self.settle, self.entity_settle, self.hover, self.advance, self.prestige_wait,
+            self.stop_bp, self.stop_prestige, self.stop_level)
+        for entry in self._value_entries:
+            entry.bind("<KeyRelease>", self._refresh_dirty)
+        self._saved_values = self._current_values()
 
     def _group(self, title, subtitle=None):
         """a titled card in the scroll body; returns the inner frame to grid controls into."""
@@ -293,15 +317,39 @@ class SettingsScreen(ctk.CTkFrame):
         body.pack(fill="x", padx=theme.PAD, pady=(0, theme.PAD))
         return body
 
+    def _current_values(self):
+        """every control's value in one comparable tuple. the dirty check diffs this against the
+        snapshot taken at build/save time, so both sides can never drift apart. entry values stay
+        raw strings on purpose: it's an unsaved-EDIT check, not a semantic one."""
+        return (
+            self.text_size.get(), bool(self.debug_var.get()), bool(self.tooltips_var.get()),
+            self.start_btn.cget("text"), self.kill_btn.cget("text"),
+            self.matcher.get(), self.thresh.get(), self.node_finder.get(),
+            bool(self.pool_inferred_var.get()), bool(self.pool_exclusive_var.get()),
+            bool(self.skip_weak_var.get()), bool(self.entity_race_var.get()),
+            bool(self.auto_prestige_var.get()),
+            tuple(e.get() for e in self._value_entries),
+        )
+
+    def _refresh_dirty(self, _arg=None):
+        """show the Save star only while the controls differ from their last-saved values.
+        _arg soaks up whatever the caller passes (an option menu's value, a key event, nothing)."""
+        if not hasattr(self, "_saved_values"):
+            return  # still building; the baseline is snapshotted at the end of __init__
+        dirty = self._current_values() != self._saved_values
+        self.save_btn.configure(text="Save settings *" if dirty else "Save settings")
+
     def _on_debug_toggle(self):
         # write through immediately so the Debug nav button can appear/disappear right away.
         if self.app.app_state.config is not None:
             self.app.app_state.config["debug"] = bool(self.debug_var.get())
         self.app.refresh_nav()
+        self._refresh_dirty()
 
     def on_show(self):
         # picks up a debug change made on the Run screen since this screen was built.
         self.debug_var.set(bool((self.app.app_state.config or {}).get("debug", False)))
+        self._refresh_dirty()
 
     def _on_text_size(self, label):
         # apply live so the user previews the size immediately, and write through to the in-memory
@@ -310,6 +358,7 @@ class SettingsScreen(ctk.CTkFrame):
         ctk.set_widget_scaling(scale)
         if self.app.app_state.config is not None:
             self.app.app_state.config["ui_scale"] = scale
+        self._refresh_dirty()
 
     def _on_tooltips_toggle(self):
         # apply live (the gate is a module flag) so hovering reflects the switch before Save.
@@ -317,6 +366,7 @@ class SettingsScreen(ctk.CTkFrame):
         if self.app.app_state.config is not None:
             self.app.app_state.config["show_tooltips"] = on
         tooltip.set_enabled(on)
+        self._refresh_dirty()
 
     def _on_pool_exclusive(self):
         # exclusive is a strict subset of inferred, so when it's on we force inferred on and disable
@@ -326,6 +376,7 @@ class SettingsScreen(ctk.CTkFrame):
             self.pool_inferred_sw.configure(state="disabled")
         else:
             self.pool_inferred_sw.configure(state="normal")
+        self._refresh_dirty()
 
     def _capture_key(self, which, btn):
         """capture the next keypress as the hotkey for `which`, storing its keysym (e.g. 'f8')."""
@@ -345,6 +396,7 @@ class SettingsScreen(ctk.CTkFrame):
         which_, btn_, funcid = self._key_capture
         self.winfo_toplevel().unbind("<Key>", funcid)
         self._key_capture = None
+        self._refresh_dirty()
 
     def _save(self):
         cfg = dict(self.app.app_state.config or {})
@@ -395,6 +447,8 @@ class SettingsScreen(ctk.CTkFrame):
             return
         self.app.app_state.config = cfg
         self.app.refresh_nav()
+        self._saved_values = self._current_values()  # everything shown is now saved
+        self._refresh_dirty()
 
     def _restore_defaults(self):
         """reset every settings-screen knob to defaults.DEFAULT_SETTINGS, leaving priority profiles
@@ -407,13 +461,18 @@ class SettingsScreen(ctk.CTkFrame):
                 "pool, spend order, timing, stops & prestige). Your priority profiles are left "
                 "untouched."):
             return
-        cfg = dict(self.app.app_state.config or {})
+        snapshot = dict(self.app.app_state.config or {})
+        cfg = dict(snapshot)
         cfg.update(defaults.DEFAULT_SETTINGS)  # settings keys only; profiles/priorities untouched
         try:
             config_io.save(cfg)
         except ValueError as e:
             messagebox.showerror("config error", str(e))
             return
+        # keep the pre-restore config for the one-level Undo (stored on app state, since
+        # rebuild_settings below destroys this screen instance). only saved after config_io.save
+        # succeeds, so the snapshot always describes a restore that actually happened.
+        self.app.app_state.settings_undo = snapshot
         self.app.app_state.config = cfg
         # the settings that take effect through a module-level toggle (not at screen build) need
         # applying by hand, same as their _on_* handlers do.
@@ -421,3 +480,22 @@ class SettingsScreen(ctk.CTkFrame):
         tooltip.set_enabled(cfg["show_tooltips"])
         self.app.refresh_nav()        # debug defaults off -> drop the Debug nav button
         self.app.rebuild_settings()   # repopulate every widget from the defaulted config
+
+    def _undo_restore(self):
+        """one-level undo for Restore defaults: persist the config snapshotted when it was clicked
+        and rebuild the screen from it, the exact inverse of _restore_defaults."""
+        snap = self.app.app_state.settings_undo
+        if snap is None:
+            return
+        cfg = dict(snap)
+        try:
+            config_io.save(cfg)
+        except ValueError as e:
+            messagebox.showerror("config error", str(e))
+            return
+        self.app.app_state.settings_undo = None   # one level only; the rebuilt screen disables Undo
+        self.app.app_state.config = cfg
+        ctk.set_widget_scaling(cfg.get("ui_scale", 1.0))
+        tooltip.set_enabled(bool(cfg.get("show_tooltips", True)))
+        self.app.refresh_nav()
+        self.app.rebuild_settings()

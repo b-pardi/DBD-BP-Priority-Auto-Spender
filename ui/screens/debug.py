@@ -13,6 +13,7 @@ unrelated files, since in dev these dirs are the repo's data/ and .tmp/.
 
 import os
 import queue
+import re
 import threading
 import time
 import tkinter as tk
@@ -114,6 +115,11 @@ class DebugScreen(ctk.CTkFrame):
             side="left", padx=(theme.PAD, 2))
         ctk.CTkButton(toolbar, text="Save frame", command=self._save_frame).pack(
             side="right")
+        # optional filename for Save frame; left empty the timestamp default is used. packed after
+        # the button (both side=right) so it lands just to its left.
+        self.save_name = ctk.CTkEntry(toolbar, width=150, font=theme.FONT_SMALL,
+                                      placeholder_text="filename (optional)")
+        self.save_name.pack(side="right", padx=(0, 4))
         # ocr'd run status (prestige / bloodweb level / bp), fed by the run loop each live scan when a
         # threshold or auto-prestige is active, so the reads can be checked against the game.
         self.status_label = ctk.CTkLabel(
@@ -339,6 +345,17 @@ class DebugScreen(ctk.CTkFrame):
         self._zoom_in() if event.delta > 0 else self._zoom_out()
         return "break"
 
+    def _save_stem(self):
+        """the optional user-typed Save-frame name as a safe filename stem, or None to keep the
+        timestamp default. a typed .png is dropped (the writes below re-append it), and characters
+        windows rejects -- including path separators, so the file can't leave the debug dir -- are
+        swapped for underscores."""
+        name = self.save_name.get().strip()
+        if name.lower().endswith(".png"):
+            name = name[:-4]
+        name = re.sub(r'[<>:"/\\|?*]', "_", name).strip(". ")
+        return name or None
+
     def _save_frame(self):
         """write the shown frame to the debug folder: the annotated overlay plus, when a run
         supplied it, the raw grab it was drawn on (that's the one detection can be re-run against)."""
@@ -347,12 +364,12 @@ class DebugScreen(ctk.CTkFrame):
             return
         out_dir = paths.debug_dir()
         out_dir.mkdir(parents=True, exist_ok=True)
-        tag = time.strftime("%Y%m%d_%H%M%S")
-        out_path = out_dir / f"frame_{tag}_annotated.png"
+        tag = self._save_stem() or "frame_" + time.strftime("%Y%m%d_%H%M%S")
+        out_path = out_dir / f"{tag}_annotated.png"
         cv2.imwrite(str(out_path), self._last_frame)
         self._append_log(f"saved frame: {out_path}")
         if self._last_raw is not None:
-            raw_path = out_dir / f"frame_{tag}_raw.png"
+            raw_path = out_dir / f"{tag}_raw.png"
             cv2.imwrite(str(raw_path), self._last_raw)
             self._append_log(f"saved frame: {raw_path}")
 
